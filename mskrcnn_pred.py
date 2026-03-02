@@ -38,6 +38,23 @@ tooth_metadata = MetadataCatalog.get(dataset_name)
 # 3. 加载配置与模型
 cfg = get_cfg()
 cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
+
+cfg.MODEL.ANCHOR_GENERATOR.SIZES = [[4, 8, 16, 32, 64]]
+
+# 2. 修正输入尺寸 (Input Size)
+cfg.INPUT.MIN_SIZE_TRAIN = (300, 400, 500)
+cfg.INPUT.MAX_SIZE_TRAIN = 600
+cfg.INPUT.MIN_SIZE_TEST = 400
+
+cfg.MODEL.ROI_HEADS.IOU_THRESHOLDS = [0.3, 0.45]
+cfg.MODEL.ROI_HEADS.IOU_LABELS = [0, -1, 1] 
+cfg.MODEL.RPN.IOU_THRESHOLDS = [0.2, 0.6]
+
+cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 256  
+cfg.MODEL.ROI_HEADS.NUM_CLASSES = 9  # 修改为你的实际类别数：9
+cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5
+cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION = 0.5     # 确保正样本占一半
+
 cfg.MODEL.ROI_HEADS.NUM_CLASSES = 9
 cfg.MODEL.WEIGHTS = model_weights # 关键：加载你跑好的模型
 # cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5 # 推理阈值
