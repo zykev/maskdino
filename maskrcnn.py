@@ -13,6 +13,10 @@ from detectron2.config import get_cfg
 from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.structures import BoxMode
+from detectron2.engine.hooks import HookBase
+from detectron2.evaluation import COCOEvaluator, inference_on_dataset
+from detectron2.data import build_detection_test_loader, DatasetMapper
+import detectron2.utils.comm as comm
 
 import matplotlib.pyplot as plt
 from collections import defaultdict
@@ -89,359 +93,517 @@ def get_caries_dicts(root_dir, is_train=False, keep_healthy_ratio=0.1):
     return dataset_dicts
 
 
-# %%
-# 1. 定义类别名称（顺序必须与 category_id - 1 对应）
-CLASS_NAMES = [
-    "caries", "white_spot_lesion", "filling_no_caries", 
-    "filling_with_caries", "fissure_sealant", "non_caries_hard_tissue", 
-    "staining", "abnormal_central_cusp", "palatal_radicular_groove"
-]
+def setup(output_dir):
+    # 3. 配置训练参数
+    cfg = get_cfg()
+    cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
+    cfg.DATASETS.TRAIN = ("tooth_train",)
+    cfg.DATASETS.TEST = ("tooth_val",) # 这样可以在训练中进行评估
+    cfg.DATALOADER.NUM_WORKERS = 4
 
-# 2. 注册数据集
-# 假设你的目录结构是 .datasets/intraoral/annosample_ch/train 和 val
-data_root = ".datasets/intraoral/single_ch_0225"
+    # 1. 适配小图和小病灶 (Anchor)
+    # 因为图小(300-500)，Anchor 必须更小
+    cfg.MODEL.ANCHOR_GENERATOR.SIZES = [[4, 8, 16, 32, 64]]
 
-for d in ["train", "val"]:
-    dataset_name = "tooth_" + d
-    if dataset_name in DatasetCatalog.list():
-        DatasetCatalog.remove(dataset_name)
-    if dataset_name in MetadataCatalog.list():
-        MetadataCatalog.remove(dataset_name)
+    # 2. 修正输入尺寸 (Input Size)
+    cfg.INPUT.MIN_SIZE_TRAIN = (300, 400, 500)
+    cfg.INPUT.MAX_SIZE_TRAIN = 600
+    cfg.INPUT.MIN_SIZE_TEST = 400
     
-    # 区分训练集和验证集
-    is_train_set = (d == "train")
-    DatasetCatalog.register(
-        dataset_name, 
-        lambda is_t=is_train_set: get_caries_dicts(data_root, is_train=is_t, keep_healthy_ratio=0.1)
-    )
-    MetadataCatalog.get(dataset_name).set(thing_classes=CLASS_NAMES)
+    # 3. 优化正样本匹配
+    # 降低门槛，让模型在训练时能把小框识别为正样本
+    cfg.MODEL.ROI_HEADS.IOU_THRESHOLDS = [0.3, 0.45]
+    cfg.MODEL.ROI_HEADS.IOU_LABELS = [0, -1, 1] 
+    cfg.MODEL.RPN.IOU_THRESHOLDS = [0.2, 0.6]
 
-tooth_metadata = MetadataCatalog.get("tooth_train")
+    cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
+    cfg.SOLVER.IMS_PER_BATCH = 4
+    cfg.SOLVER.BASE_LR = 0.005 
+    cfg.SOLVER.MAX_ITER = 20000    # 9个类别需要更长的迭代，建议至少 3000+
+    # 学习率衰减阶段（通常在 70% 和 90% 的位置降速）
+    cfg.SOLVER.STEPS = (14000, 18000)  # 在 14k 和 18k 次迭代时降低学习率
+    cfg.SOLVER.GAMMA = 0.1             # 每次降低为原来的 1/10
 
-# 3. 配置训练参数
-cfg = get_cfg()
-cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
-cfg.DATASETS.TRAIN = ("tooth_train",)
-cfg.DATASETS.TEST = ("tooth_val",) # 这样可以在训练中进行评估
-cfg.DATALOADER.NUM_WORKERS = 4
+    # 热身阶段（防止模型初期跑飞）
+    cfg.SOLVER.WARMUP_ITERS = 1000     # 前 1000 次慢慢提升学习率      
 
-cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
-cfg.SOLVER.IMS_PER_BATCH = 2  
-cfg.SOLVER.BASE_LR = 0.00025  
-cfg.SOLVER.MAX_ITER = 3000    # 9个类别需要更长的迭代，建议至少 3000+
-cfg.SOLVER.STEPS = []        
+    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 256  
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = 9  # 修改为你的实际类别数：9
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5
+    cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION = 0.5     # 确保正样本占一半
 
-cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128   
-cfg.MODEL.ROI_HEADS.NUM_CLASSES = 9  # 修改为你的实际类别数：9
-cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5
+    cfg.TEST.EVAL_PERIOD = 500
 
-# --- 新增：处理类别不平衡的核心配置 ---
+    # --- 新增：处理类别不平衡的核心配置 ---
 
-# 允许 Dataloader 加载没有标注的图片（即我们保留的那 10% 健康牙齿，作为负样本）
-cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False 
+    # 允许 Dataloader 加载没有标注的图片（即我们保留的那 10% 健康牙齿，作为负样本）
+    cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False 
 
-# 启用重复因子采样器 (Repeat Factor Sampler)
-cfg.DATALOADER.SAMPLER_TRAIN = "RepeatFactorTrainingSampler"
+    # 启用重复因子采样器 (Repeat Factor Sampler)
+    cfg.DATALOADER.SAMPLER_TRAIN = "RepeatFactorTrainingSampler"
 
-# 设置重复阈值。频率低于这个比例的类别（如 Caries, Filling）会被上采样（即在同一个 Epoch 中多次出现）
-# 0.05 到 0.1 是常见的经验值，你可以根据类别频率分布进行微调
-cfg.DATALOADER.REPEAT_THRESHOLD = 0.05 
-# ------------------------------------
+    # 设置重复阈值。频率低于这个比例的类别（如 Caries, Filling）会被上采样（即在同一个 Epoch 中多次出现）
+    # 0.05 到 0.1 是常见的经验值，你可以根据类别频率分布进行微调
+    cfg.DATALOADER.REPEAT_THRESHOLD = 0.1 
+    # ------------------------------------
 
-cfg.OUTPUT_DIR = "output/maskrcnn_caries_v2"
-os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    cfg.OUTPUT_DIR = output_dir
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+
+    return cfg
+
+# %%
+def setup_dataset(data_root):
+    # 1. 定义类别名称（顺序必须与 category_id - 1 对应）
+    CLASS_NAMES = [
+        "caries", "white_spot_lesion", "filling_no_caries", 
+        "filling_with_caries", "fissure_sealant", "non_caries_hard_tissue", 
+        "staining", "abnormal_central_cusp", "palatal_radicular_groove"
+    ]
+
+    # 2. 注册数据集
+
+    for d in ["train", "val"]:
+        dataset_name = "tooth_" + d
+        if dataset_name in DatasetCatalog.list():
+            DatasetCatalog.remove(dataset_name)
+        if dataset_name in MetadataCatalog.list():
+            MetadataCatalog.remove(dataset_name)
+        
+        # 区分训练集和验证集
+        is_train_set = (d == "train")
+
+
+        DatasetCatalog.register(
+            dataset_name, 
+            lambda is_t=is_train_set: get_caries_dicts(data_root, is_train=is_t, keep_healthy_ratio=0.1)
+        )
+        MetadataCatalog.get(dataset_name).set(thing_classes=CLASS_NAMES)
+
+    tooth_metadata = MetadataCatalog.get("tooth_train")
+
+    return tooth_metadata
+
+
+
+class LossEvalHook(HookBase):
+    def __init__(self, eval_period, model, data_loader):
+        self._model = model
+        self._period = eval_period
+        self._data_loader = data_loader
+
+    def _get_loss(self, data):
+        # 强制模型计算 Loss (MaskDINO/Detectron2 模型在训练模式下传入 GT 会返回 Loss)
+        metrics_dict = self._model(data)
+        metrics_dict = {
+            k: v.detach().cpu().item() if isinstance(v, torch.Tensor) else float(v)
+            for k, v in metrics_dict.items()
+        }
+        total_losses_reduced = sum(loss for loss in metrics_dict.values())
+        return total_losses_reduced
+
+    def _do_loss_eval(self):
+
+        losses = []
+        
+        # 将模型设为训练模式以获取 loss，但通过 no_grad 禁用梯度更新
+        self._model.train() 
+        
+        with torch.no_grad():
+            for idx, inputs in enumerate(self._data_loader):
+                
+                # 计算当前 batch 的 loss
+                loss_batch = self._get_loss(inputs)
+                losses.append(loss_batch)
+
+        mean_loss = np.mean(losses)
+        # 写入 TensorBoard，Key 设为 validation_loss
+        self.trainer.storage.put_scalar('validation_loss', mean_loss)
+        print(f"\n[LossEvalHook] iter {self.trainer.iter}: val Loss = {mean_loss:.4f}\n")
+        
+        comm.synchronize()
+        return losses
+
+    def after_step(self):
+        next_iter = self.trainer.iter + 1
+        is_final = next_iter == self.trainer.max_iter
+        # 根据 period 定期触发
+        if is_final or (self._period > 0 and next_iter % self._period == 0):
+            self._do_loss_eval()
 
 
 # %%
 # 4. 开始训练
-trainer = DefaultTrainer(cfg) 
-trainer.resume_or_load(resume=False)
-trainer.train()
+# 自定义 Trainer 类
+class Trainer(DefaultTrainer):
+    @classmethod
+    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
+        # 必须有这个，TensorBoard 才会出现 bbox/AP 曲线
+        if output_folder is None:
+            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
+        return COCOEvaluator(dataset_name, cfg, True, output_folder)
 
-# %%
-# 5. 开始测试
-cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
-predictor = DefaultPredictor(cfg)
-dataset_dicts_val = DatasetCatalog.get("tooth_val")
+    def build_hooks(self):
+        # 获取系统默认的 hooks (含自动评估 AP 的 Hook)
+        hooks_list = super().build_hooks()
+        
+        # 构建验证集数据加载器 (is_train=True 确保加载 GT 标注用于算 Loss)
+        val_loader = build_detection_test_loader(
+            self.cfg, 
+            self.cfg.DATASETS.TEST[0], 
+            mapper=DatasetMapper(self.cfg, True)
+        )
+        
+        # 将自定义的 LossEvalHook 插入到 Hook 列表中
+        # 使用 cfg.TEST.EVAL_PERIOD 作为触发周期
+        loss_eval_hook = LossEvalHook(
+            self.cfg.TEST.EVAL_PERIOD,
+            self.model,
+            val_loader
+        )
+        
+        # 插入位置：通常放在倒数第二（在日志打印 Hook 之前）
+        hooks_list.insert(-1, loss_eval_hook)
+        return hooks_list
+
+
 
 # %%
 # distribution of confidence scores for each class in the validation set
+def vis_confidence_score(cfg, predictor, dataset_dicts_val, class_names_val):
+    scores_per_class = defaultdict(list)
 
-scores_per_class = defaultdict(list)
-class_names = MetadataCatalog.get("tooth_train").thing_classes
-
-print("Analyzing validation set scores... this may take a minute.")
-# 建议遍历完整的验证集以获得准确分布
-for d in dataset_dicts_val:
-    im = cv2.imread(d["file_name"])
-    if im is None: continue
-    
-    with torch.no_grad():
-        outputs = predictor(im)
-        instances = outputs["instances"].to("cpu")
+    print("Analyzing validation set scores... this may take a minute.")
+    # 建议遍历完整的验证集以获得准确分布
+    for d in dataset_dicts_val:
+        im = cv2.imread(d["file_name"])
+        if im is None: continue
         
-        # 提取类别 ID 和对应的分数
-        classes = instances.pred_classes.tolist()
-        scores = instances.scores.tolist()
+        with torch.no_grad():
+            outputs = predictor(im)
+            instances = outputs["instances"].to("cpu")
+            
+            # 提取类别 ID 和对应的分数
+            classes = instances.pred_classes.tolist()
+            scores = instances.scores.tolist()
+            
+            for cls_id, score in zip(classes, scores):
+                scores_per_class[cls_id].append(score)
+
+    plt.figure(figsize=(20, 15))
+    plt.subplots_adjust(hspace=0.4, wspace=0.3)
+    plt.suptitle("Confidence Score Distribution per Class", fontsize=20)
+
+    for i in range(len(class_names_val)):
+        plt.subplot(3, 3, i + 1)
+        data = scores_per_class[i]
         
-        for cls_id, score in zip(classes, scores):
-            scores_per_class[cls_id].append(score)
+        if len(data) > 0:
+            # 绘制直方图
+            plt.hist(data, bins=30, color='skyblue', edgecolor='black', alpha=0.7)
+            plt.axvline(np.mean(data), color='red', linestyle='dashed', linewidth=1, label=f'Mean: {np.mean(data):.2f}')
+            plt.title(f"Class: {class_names_val[i]}\n(Samples: {len(data)})")
+        else:
+            plt.text(0.5, 0.5, "No Predictions", ha='center', va='center')
+            plt.title(f"Class: {class_names_val[i]}")
+            
+        plt.xlim(0, 1.0)
+        plt.xlabel("Confidence Score")
+        plt.ylabel("Frequency")
+        plt.legend()
 
-plt.figure(figsize=(20, 15))
-plt.subplots_adjust(hspace=0.4, wspace=0.3)
-plt.suptitle("Confidence Score Distribution per Class", fontsize=20)
-
-for i in range(len(class_names)):
-    plt.subplot(3, 3, i + 1)
-    data = scores_per_class[i]
-    
-    if len(data) > 0:
-        # 绘制直方图
-        plt.hist(data, bins=30, color='skyblue', edgecolor='black', alpha=0.7)
-        plt.axvline(np.mean(data), color='red', linestyle='dashed', linewidth=1, label=f'Mean: {np.mean(data):.2f}')
-        plt.title(f"Class: {class_names[i]}\n(Samples: {len(data)})")
-    else:
-        plt.text(0.5, 0.5, "No Predictions", ha='center', va='center')
-        plt.title(f"Class: {class_names[i]}")
-        
-    plt.xlim(0, 1.0)
-    plt.xlabel("Confidence Score")
-    plt.ylabel("Frequency")
-    plt.legend()
-
-plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-plt.savefig(os.path.join(cfg.OUTPUT_DIR, "confidence_score_distribution.png"))
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(os.path.join(cfg.OUTPUT_DIR, "inference", "confidence_score_distribution.png"))
 
 # %%
 # 5. 推理与可视化
-class_names = MetadataCatalog.get("tooth_train").thing_classes
-num_classes = len(class_names)
-max_samples = 5
-cell_size = 300       
-padding = 15          
-title_width = 250     
-text_font_scale = 0.4 
-bg_color = (40, 40, 40) 
+# class_names = MetadataCatalog.get("tooth_train").thing_classes
+# num_classes = len(class_names)
+# max_samples = 5
+# cell_size = 300       
+# padding = 15          
+# title_width = 250     
+# text_font_scale = 0.4 
+# bg_color = (40, 40, 40) 
 
-total_width = title_width + (cell_size + padding) * max_samples
+# total_width = title_width + (cell_size + padding) * max_samples
 
-category_to_samples = {i: [] for i in range(num_classes)}
-for d in dataset_dicts_val:
-    for ann in d["annotations"]:
-        cat_id = ann["category_id"]
-        if cat_id < num_classes:
-            if d not in category_to_samples[cat_id]:
-                category_to_samples[cat_id].append(d)
-for i, name in enumerate(class_names):
-    print(f"Category {i} ({name}): Found {len(category_to_samples[i])} samples")
+# category_to_samples = {i: [] for i in range(num_classes)}
+# for d in dataset_dicts_val:
+#     for ann in d["annotations"]:
+#         cat_id = ann["category_id"]
+#         if cat_id < num_classes:
+#             if d not in category_to_samples[cat_id]:
+#                 category_to_samples[cat_id].append(d)
+# for i, name in enumerate(class_names):
+#     print(f"Category {i} ({name}): Found {len(category_to_samples[i])} samples")
 
-def add_label(img, text, color=(255, 255, 255)):
-    cv2.putText(img, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 
-                text_font_scale, color, 1, cv2.LINE_AA)
-    return img
+# def add_label(img, text, color=(255, 255, 255)):
+#     cv2.putText(img, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 
+#                 text_font_scale, color, 1, cv2.LINE_AA)
+#     return img
 
-all_category_blocks = []
+# all_category_blocks = []
 
-for cat_id, cat_name in enumerate(class_names):
-    samples = category_to_samples[cat_id]
+# for cat_id, cat_name in enumerate(class_names):
+#     samples = category_to_samples[cat_id]
     
-    # 创建这一类别的双行容器块
-    cat_block_height = cell_size * 2 + padding
-    cat_block = np.full((cat_block_height, total_width, 3), bg_color, dtype=np.uint8)
+#     # 创建这一类别的双行容器块
+#     cat_block_height = cell_size * 2 + padding
+#     cat_block = np.full((cat_block_height, total_width, 3), bg_color, dtype=np.uint8)
 
-    # 绘制左侧类别标题
-    cv2.putText(cat_block, cat_name, (20, cat_block_height // 2), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+#     # 绘制左侧类别标题
+#     cv2.putText(cat_block, cat_name, (20, cat_block_height // 2), 
+#                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
-    if not samples:
-        cv2.putText(cat_block, "NO SAMPLES IN VAL SET", (title_width + 50, cat_block_height // 2), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 100), 1)
-    else:
-        # 随机抽取样本
-        selected = random.sample(samples, min(len(samples), max_samples))
+#     if not samples:
+#         cv2.putText(cat_block, "NO SAMPLES IN VAL SET", (title_width + 50, cat_block_height // 2), 
+#                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 100), 1)
+#     else:
+#         # 随机抽取样本
+#         selected = random.sample(samples, min(len(samples), max_samples))
         
-        for idx, d in enumerate(selected):
-            img_bgr = cv2.imread(d["file_name"])
-            x_offset = title_width + idx * (cell_size + padding)
+#         for idx, d in enumerate(selected):
+#             img_bgr = cv2.imread(d["file_name"])
+#             x_offset = title_width + idx * (cell_size + padding)
             
-            # --- 处理 GT (上行) ---
-            v_gt = Visualizer(img_bgr[:, :, ::-1], metadata=tooth_metadata, scale=0.5)
-            img_gt = v_gt.draw_dataset_dict(d).get_image()[:, :, ::-1]
-            img_gt = cv2.resize(img_gt, (cell_size, cell_size))
-            img_gt = add_label(img_gt, "GT", (0, 255, 0))
+#             # --- 处理 GT (上行) ---
+#             v_gt = Visualizer(img_bgr[:, :, ::-1], metadata=tooth_metadata, scale=0.5)
+#             img_gt = v_gt.draw_dataset_dict(d).get_image()[:, :, ::-1]
+#             img_gt = cv2.resize(img_gt, (cell_size, cell_size))
+#             img_gt = add_label(img_gt, "GT", (0, 255, 0))
             
-            # --- 处理 Prediction (下行) ---
-            outputs = predictor(img_bgr)
-            v_pred = Visualizer(img_bgr[:, :, ::-1], metadata=tooth_metadata, scale=0.5)
-            img_pred = v_pred.draw_instance_predictions(outputs["instances"].to("cpu")).get_image()[:, :, ::-1]
-            img_pred = cv2.resize(img_pred, (cell_size, cell_size))
-            img_pred = add_label(img_pred, f"PRED (th=0.5)", (0, 0, 255))
+#             # --- 处理 Prediction (下行) ---
+#             outputs = predictor(img_bgr)
+#             v_pred = Visualizer(img_bgr[:, :, ::-1], metadata=tooth_metadata, scale=0.5)
+#             img_pred = v_pred.draw_instance_predictions(outputs["instances"].to("cpu")).get_image()[:, :, ::-1]
+#             img_pred = cv2.resize(img_pred, (cell_size, cell_size))
+#             img_pred = add_label(img_pred, f"PRED (th=0.5)", (0, 0, 255))
             
-            # 填入容器
-            cat_block[0:cell_size, x_offset : x_offset+cell_size] = img_gt
-            cat_block[cell_size + padding : cell_size*2 + padding, x_offset : x_offset+cell_size] = img_pred
+#             # 填入容器
+#             cat_block[0:cell_size, x_offset : x_offset+cell_size] = img_gt
+#             cat_block[cell_size + padding : cell_size*2 + padding, x_offset : x_offset+cell_size] = img_pred
 
-    all_category_blocks.append(cat_block)
+#     all_category_blocks.append(cat_block)
     
-    # 类别之间的分割线
-    separator = np.full((15, total_width, 3), (20, 20, 20), dtype=np.uint8)
-    all_category_blocks.append(separator)
+#     # 类别之间的分割线
+#     separator = np.full((15, total_width, 3), (20, 20, 20), dtype=np.uint8)
+#     all_category_blocks.append(separator)
 
-final_master_grid = np.vstack(all_category_blocks)
-save_path = os.path.join(cfg.OUTPUT_DIR, "res_comparison_grid.jpg")
-cv2.imwrite(save_path, final_master_grid)
+# final_master_grid = np.vstack(all_category_blocks)
+# save_path = os.path.join(cfg.OUTPUT_DIR, "res_comparison_grid.jpg")
+# cv2.imwrite(save_path, final_master_grid)
+
+
 
 
 # %%
-# 6. 性能评估 (mAP)
-from detectron2.evaluation import COCOEvaluator, inference_on_dataset
-from detectron2.data import build_detection_test_loader
-
-evaluator = COCOEvaluator("tooth_val", output_dir=cfg.OUTPUT_DIR)
-val_loader = build_detection_test_loader(cfg, "tooth_val")
-print(inference_on_dataset(predictor.model, val_loader, evaluator))
+def vis_img(cfg, predictor, dataset_dicts_val, class_names_val):
+    vis_save_dir = os.path.join(cfg.OUTPUT_DIR, "inference", "custom_visualizations")
+    os.makedirs(vis_save_dir, exist_ok=True)
 
 
-# %%
-vis_save_dir = os.path.join(cfg.OUTPUT_DIR, "custom_visualizations")
-os.makedirs(vis_save_dir, exist_ok=True)
+    num_classes = len(class_names_val)
+    max_samples = 5
 
-class_names = MetadataCatalog.get("tooth_train").thing_classes
-num_classes = len(class_names)
-max_samples = 5
+    # 定义一套固定的颜色表 (BGR格式，用于 OpenCV)
+    # 确保各个类别的颜色区分度高
+    COLORS = [
+        (0, 0, 255),     # caries: 红色
+        (0, 255, 255),   # white_spot_lesion: 黄色
+        (255, 0, 0),     # filling_no_caries: 蓝色
+        (255, 0, 255),   # filling_with_caries: 紫色
+        (0, 255, 0),     # fissure_sealant: 绿色
+        (255, 255, 0),   # non_caries_hard_tissue: 青色
+        (128, 0, 128),   # staining: 深紫
+        (0, 128, 255),   # abnormal_central_cusp: 橙色
+        (128, 128, 0)    # palatal_radicular_groove: 深青
+    ]
 
-# 定义一套固定的颜色表 (BGR格式，用于 OpenCV)
-# 确保各个类别的颜色区分度高
-COLORS = [
-    (0, 0, 255),     # caries: 红色
-    (0, 255, 255),   # white_spot_lesion: 黄色
-    (255, 0, 0),     # filling_no_caries: 蓝色
-    (255, 0, 255),   # filling_with_caries: 紫色
-    (0, 255, 0),     # fissure_sealant: 绿色
-    (255, 255, 0),   # non_caries_hard_tissue: 青色
-    (128, 0, 128),   # staining: 深紫
-    (0, 128, 255),   # abnormal_central_cusp: 橙色
-    (128, 128, 0)    # palatal_radicular_groove: 深青
-]
+    # 按类别收集所有样本
+    category_to_samples = {i: [] for i in range(num_classes)}
+    for d in dataset_dicts_val:
+        for ann in d["annotations"]:
+            cat_id = ann["category_id"]
+            if cat_id < num_classes:
+                if d not in category_to_samples[cat_id]:
+                    category_to_samples[cat_id].append(d)
 
-# 按类别收集所有样本
-category_to_samples = {i: [] for i in range(num_classes)}
-for d in dataset_dicts_val:
-    for ann in d["annotations"]:
-        cat_id = ann["category_id"]
-        if cat_id < num_classes:
-            if d not in category_to_samples[cat_id]:
-                category_to_samples[cat_id].append(d)
+    for i, name in enumerate(class_names_val):
+        print(f"Category {i} ({name}): Found {len(category_to_samples[i])} samples")
 
-for i, name in enumerate(class_names):
-    print(f"Category {i} ({name}): Found {len(category_to_samples[i])} samples")
-
-# --- 自定义绘制函数：Ground Truth ---
-def draw_custom_gt(image_bgr, annotations, height, width):
-    vis_img = image_bgr.copy()
-    for ann in annotations:
-        cls_id = ann["category_id"]
-        color = COLORS[cls_id % len(COLORS)]
-        
-        # 1. 绘制矩形框
-        x1, y1, x2, y2 = map(int, ann["bbox"])
-        cv2.rectangle(vis_img, (x1, y1), (x2, y2), color, 2)
-        
-        # 2. 绘制分割掩码 (半透明)
-        segm = ann["segmentation"]
-        if isinstance(segm, list): # 处理多边形格式
-            for poly in segm:
-                poly_pts = np.array(poly, dtype=np.int32).reshape(-1, 2)
-                mask = np.zeros((height, width), dtype=np.uint8)
-                cv2.fillPoly(mask, [poly_pts], 1)
-                bool_mask = mask.astype(bool)
-                # Alpha 融合 (0.5 透明度)
-                vis_img[bool_mask] = vis_img[bool_mask] * 0.5 + np.array(color) * 0.5
-    return vis_img
-
-# --- 自定义绘制函数：Predictions ---
-def draw_custom_pred(image_bgr, instances, conf_thresh=0.5):
-    vis_img = image_bgr.copy()
-    
-    # 1. 拦截空预测：如果模型什么都没预测出来，直接返回原图
-    if len(instances) == 0:
+    # --- 自定义绘制函数：Ground Truth ---
+    def draw_custom_gt(image_bgr, annotations, height, width):
+        vis_img = image_bgr.copy()
+        for ann in annotations:
+            cls_id = ann["category_id"]
+            color = COLORS[cls_id % len(COLORS)]
+            
+            # 1. 绘制矩形框
+            x1, y1, x2, y2 = map(int, ann["bbox"])
+            cv2.rectangle(vis_img, (x1, y1), (x2, y2), color, 2)
+            
+            # 2. 绘制分割掩码 (半透明)
+            segm = ann["segmentation"]
+            if isinstance(segm, list): # 处理多边形格式
+                for poly in segm:
+                    poly_pts = np.array(poly, dtype=np.int32).reshape(-1, 2)
+                    mask = np.zeros((height, width), dtype=np.uint8)
+                    cv2.fillPoly(mask, [poly_pts], 1)
+                    bool_mask = mask.astype(bool)
+                    # Alpha 融合 (0.5 透明度)
+                    vis_img[bool_mask] = vis_img[bool_mask] * 0.5 + np.array(color) * 0.5
         return vis_img
+
+    # --- 自定义绘制函数：Predictions ---
+    def draw_custom_pred(image_bgr, instances, conf_thresh=0.5):
+        vis_img = image_bgr.copy()
         
-    # 2. 拦截缺少 Box 的情况
-    if not instances.has("pred_boxes"):
+        # 1. 拦截空预测：如果模型什么都没预测出来，直接返回原图
+        if len(instances) == 0:
+            return vis_img
+            
+        # 2. 拦截缺少 Box 的情况
+        if not instances.has("pred_boxes"):
+            return vis_img
+            
+        boxes = instances.pred_boxes.tensor.cpu().numpy()
+        classes = instances.pred_classes.cpu().numpy()
+        
+        # 安全获取 scores
+        if instances.has("scores"):
+            scores = instances.scores.cpu().numpy()
+        else:
+            scores = np.ones(len(boxes)) # 防御性编程：如果没有 scores 默认全通过
+            
+        # 3. 安全获取 masks
+        has_masks = instances.has("pred_masks")
+        if has_masks:
+            masks = instances.pred_masks.cpu().numpy()
+        
+        # 4. 遍历并绘制
+        for i in range(len(boxes)):
+            if scores[i] < conf_thresh: # 过滤低置信度预测
+                continue
+                
+            cls_id = classes[i]
+            color = COLORS[cls_id % len(COLORS)]
+            
+            # 绘制矩形框
+            x1, y1, x2, y2 = map(int, boxes[i])
+            cv2.rectangle(vis_img, (x1, y1), (x2, y2), color, 2)
+
+            # 绘制分割掩码 (半透明)
+            if has_masks:
+                mask = masks[i]
+                # 确保 mask 是 boolean 格式
+                if mask.dtype != bool:
+                    mask = mask > 0.5 
+                vis_img[mask] = vis_img[mask] * 0.5 + np.array(color) * 0.5
+                
         return vis_img
-        
-    boxes = instances.pred_boxes.tensor.cpu().numpy()
-    classes = instances.pred_classes.cpu().numpy()
-    
-    # 安全获取 scores
-    if instances.has("scores"):
-        scores = instances.scores.cpu().numpy()
-    else:
-        scores = np.ones(len(boxes)) # 防御性编程：如果没有 scores 默认全通过
-        
-    # 3. 安全获取 masks
-    has_masks = instances.has("pred_masks")
-    if has_masks:
-        masks = instances.pred_masks.cpu().numpy()
-    
-    # 4. 遍历并绘制
-    for i in range(len(boxes)):
-        if scores[i] < conf_thresh: # 过滤低置信度预测
+
+
+    target_size = (640, 640) # 统一缩放尺寸，确保矩阵对齐
+    for cat_id, cat_name in enumerate(class_names_val):
+        samples = category_to_samples[cat_id]
+        if not samples:
             continue
             
-        cls_id = classes[i]
-        color = COLORS[cls_id % len(COLORS)]
+        # 为当前类别创建一个独立的文件夹
+        cat_dir = os.path.join(vis_save_dir, cat_name)
+        os.makedirs(cat_dir, exist_ok=True)
         
-        # 绘制矩形框
-        x1, y1, x2, y2 = map(int, boxes[i])
-        cv2.rectangle(vis_img, (x1, y1), (x2, y2), color, 2)
+        # 根据之前设定的随机种子抽取固定样本
+        selected = random.sample(samples, min(len(samples), max_samples))
+        
+        row_orig, row_gt, row_pred = [], [], []
 
-        # 绘制分割掩码 (半透明)
-        if has_masks:
-            mask = masks[i]
-            # 确保 mask 是 boolean 格式
-            if mask.dtype != bool:
-                mask = mask > 0.5 
-            vis_img[mask] = vis_img[mask] * 0.5 + np.array(color) * 0.5
+        for idx, d in enumerate(selected):
+            img_path = d["file_name"]
+            img_bgr = cv2.imread(img_path)
+            if img_bgr is None: continue
             
-    return vis_img
+            height, width = img_bgr.shape[:2]
+            
+            # 1. 保存原图 (Original)
+            orig_save_path = os.path.join(cat_dir, f"sample_{idx}_0_orig.jpg")
+            cv2.imwrite(orig_save_path, img_bgr)
+            
+            # 2. 生成并保存 Ground Truth (GT)
+            img_gt = draw_custom_gt(img_bgr, d["annotations"], height, width)
+            gt_save_path = os.path.join(cat_dir, f"sample_{idx}_1_gt.jpg")
+            cv2.imwrite(gt_save_path, img_gt)
+            
+            # 3. 生成并保存 Predictions (Pred)
+            outputs = predictor(img_bgr)
+            instances = outputs["instances"].to("cpu")
+            img_pred = draw_custom_pred(img_bgr, instances, conf_thresh=0.5)
+            pred_save_path = os.path.join(cat_dir, f"sample_{idx}_2_pred.jpg")
+            cv2.imwrite(pred_save_path, img_pred)
 
-# --- 主保存循环 ---
-for cat_id, cat_name in enumerate(class_names):
-    samples = category_to_samples[cat_id]
-    if not samples:
-        continue
-        
-    # 为当前类别创建一个独立的文件夹
-    cat_dir = os.path.join(vis_save_dir, cat_name)
-    os.makedirs(cat_dir, exist_ok=True)
-    
-    # 根据之前设定的随机种子抽取固定样本
-    selected = random.sample(samples, min(len(samples), max_samples))
-    
-    for idx, d in enumerate(selected):
-        img_path = d["file_name"]
-        img_bgr = cv2.imread(img_path)
-        if img_bgr is None: continue
-        
-        height, width = img_bgr.shape[:2]
-        
-        # 1. 保存原图 (Original)
-        orig_save_path = os.path.join(cat_dir, f"sample_{idx}_0_orig.jpg")
-        cv2.imwrite(orig_save_path, img_bgr)
-        
-        # 2. 生成并保存 Ground Truth (GT)
-        img_gt = draw_custom_gt(img_bgr, d["annotations"], height, width)
-        gt_save_path = os.path.join(cat_dir, f"sample_{idx}_1_gt.jpg")
-        cv2.imwrite(gt_save_path, img_gt)
-        
-        # 3. 生成并保存 Predictions (Pred)
-        outputs = predictor(img_bgr)
-        instances = outputs["instances"].to("cpu")
-        img_pred = draw_custom_pred(img_bgr, instances, conf_thresh=0.5)
-        pred_save_path = os.path.join(cat_dir, f"sample_{idx}_2_pred.jpg")
-        cv2.imwrite(pred_save_path, img_pred)
+            # --- 3. 为矩阵拼接做准备 (缩放并存入行列表) ---
+            # 统一缩放，并在图上标记 Sample 编号
+            res_o = cv2.resize(img_bgr, target_size)
+            res_g = cv2.resize(img_gt, target_size)
+            res_p = cv2.resize(img_pred, target_size)
+            
+            # 在第一行（原图）上方标一下 Sample 序号
+            cv2.putText(res_o, f"Sample {idx}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
 
-print(f"\n✅ 所有的独立可视化图片已成功保存至: {vis_save_dir}")
-# %%
+            row_orig.append(res_o)
+            row_gt.append(res_g)
+            row_pred.append(res_p)
+        
+        # --- 4. 合成大矩阵 ---
+        if row_orig:
+            # 横向拼接每一行 (Columns = Samples)
+            combined_orig = np.hstack(row_orig)
+            combined_gt = np.hstack(row_gt)
+            combined_pred = np.hstack(row_pred)
+
+            # 纵向拼接这三行 (Rows = Stages)
+            summary_matrix = np.vstack([combined_orig, combined_gt, combined_pred])
+
+            # 可选：在最左侧增加一个文字标签列（Origin/GT/Pred）
+            label_w = 150
+            label_col = np.zeros((summary_matrix.shape[0], label_w, 3), dtype=np.uint8)
+            labels = ["ORIGIN", "GT", "PRED"]
+            for i, txt in enumerate(labels):
+                y_pos = i * target_size[1] + target_size[1] // 2
+                cv2.putText(label_col, txt, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            
+            final_output = np.hstack([label_col, summary_matrix])
+
+            # 保存该类别的汇总矩阵图
+            matrix_save_path = os.path.join(cat_dir, f"00_{cat_name}_summary_matrix.jpg")
+            cv2.imwrite(matrix_save_path, final_output)
+
+    print(f"\n 所有的独立可视化图片已成功保存至: {vis_save_dir}")
+
+
+
+
+if __name__ == "__main__":
+
+    output_dir = "output/maskrcnn_caries_v3"
+    cfg = setup(output_dir)
+    data_root = ".datasets/intraoral/single_ch_0225"
+    tooth_metadata = setup_dataset(data_root)
+    trainer = Trainer(cfg) 
+    trainer.resume_or_load(resume=False)
+    trainer.train()
+
+    # 5. 开始测试
+    cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
+    predictor = DefaultPredictor(cfg)
+    dataset_dicts_val = DatasetCatalog.get("tooth_val")
+    class_names_val = MetadataCatalog.get("tooth_val").thing_classes
+    
+    vis_confidence_score(cfg, predictor, dataset_dicts_val, class_names_val)
+    vis_img(cfg, predictor, dataset_dicts_val, class_names_val)
+
+    # 6. 性能评估 (mAP)
+    evaluator = COCOEvaluator("tooth_val", output_dir=cfg.OUTPUT_DIR)
+    val_loader = build_detection_test_loader(cfg, "tooth_val")
+    print(inference_on_dataset(predictor.model, val_loader, evaluator))

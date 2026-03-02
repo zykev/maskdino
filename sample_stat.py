@@ -6,6 +6,7 @@ from pathlib import Path
 
 label_dict = {"1": "Caries", "11": "White spot leison", "3": "Filling without caries", 
               "6": "Fissure sealant", "10": "Non-caries disease (hard tissue)", "12": "Staining", 
+              "4": "Filling with caries", "7": "Abnormal central cusp", "8": "Palatal radicular groove",
               "loss of fissure sealant": "Loss of fissure sealant", "abnormal central cusp": "Abnormal central cusp"}
 
 
@@ -112,6 +113,7 @@ random.seed(42)
 
 label_dict = {"1": "Caries", "11": "White spot leison", "3": "Filling without caries", 
               "6": "Fissure sealant", "10": "Non-caries disease (hard tissue)", "12": "Staining", 
+              "4": "Filling with caries", "7": "Abnormal central cusp", "8": "Palatal radicular groove",
               "loss of fissure sealant": "Loss of fissure sealant", "abnormal central cusp": "Abnormal central cusp"}
 
 def visualize_unhealthy_samples(root_path):
