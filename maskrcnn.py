@@ -24,7 +24,7 @@ from collections import defaultdict
 
 
 # %%
-def get_caries_dicts(root_dir, is_train=False, keep_healthy_ratio=0.1):
+def get_caries_dicts(root_dir, is_train=False, keep_healthy_ratio=0.1, in_eval=False):
     """
     img_dir: 包含 single_tooth 文件夹的根目录
     json_path: 转换后的 coco json 文件路径
@@ -62,7 +62,7 @@ def get_caries_dicts(root_dir, is_train=False, keep_healthy_ratio=0.1):
         # --- 新增：健康样本降采样逻辑 ---
         if len(anns) == 0:
             # 如果是训练集，且是健康图片，按概率决定是否保留
-            if is_train and random.random() > keep_healthy_ratio:
+            if is_train and not in_eval and random.random() > keep_healthy_ratio:
                 continue
         # ------------------------------
         record = {}

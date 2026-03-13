@@ -28,12 +28,27 @@ CLASS_NAMES = [
 ]
 
 # 2. 重新注册验证集 (确保环境干净)
-dataset_name = "tooth_val"
-if dataset_name in DatasetCatalog.list():
-    DatasetCatalog.remove(dataset_name)
-DatasetCatalog.register(dataset_name, lambda: get_caries_dicts(data_root, is_train=False))
-MetadataCatalog.get(dataset_name).set(thing_classes=CLASS_NAMES)
-tooth_metadata = MetadataCatalog.get(dataset_name)
+def register_tooth_datasets():
+    datasets_to_reg = ["tooth_train", "tooth_val"]
+    
+    for dataset_name in datasets_to_reg:
+        # 如果已存在，先移除，确保环境干净
+        if dataset_name in DatasetCatalog.list():
+            DatasetCatalog.remove(dataset_name)
+            MetadataCatalog.remove(dataset_name)
+        
+        # 注册数据集
+        if "train" in dataset_name:
+            DatasetCatalog.register(dataset_name, lambda: get_caries_dicts(data_root, is_train=True, in_eval=True))
+        else:
+            DatasetCatalog.register(dataset_name, lambda: get_caries_dicts(data_root, is_train=False, in_eval=True))
+        # 显式设置类别名称，防止 ID 映射错乱
+        MetadataCatalog.get(dataset_name).set(thing_classes=CLASS_NAMES)
+
+# 执行注册
+register_tooth_datasets()
+
+
 
 # 3. 加载配置与模型
 cfg = get_cfg()
@@ -61,7 +76,7 @@ cfg.MODEL.WEIGHTS = model_weights # 关键：加载你跑好的模型
 # predictor = DefaultPredictor(cfg)
 
 # 获取验证集数据
-dataset_dicts_val = DatasetCatalog.get(dataset_name)
+dataset_dicts_val = DatasetCatalog.get("tooth_val")
 print(f"Loaded {len(dataset_dicts_val)} validation images.")
 
 # %% [2] 统计置信度分布 (Score Distribution)
@@ -481,8 +496,32 @@ print(f"所有的独立可视化图片已成功保存至: {vis_save_dir}")
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset
 from detectron2.data import build_detection_test_loader
 
-evaluator = COCOEvaluator(dataset_name, output_dir=output_dir)
-val_loader = build_detection_test_loader(cfg, dataset_name)
-print("Starting COCO Evaluation...")
-results = inference_on_dataset(predictor.model, val_loader, evaluator)
-print(results)
+
+
+
+# %%
+import shutil
+
+# 1. 定义评估函数，强制隔离环境
+def safe_evaluate(model, dataset_name, cfg, base_output_dir):
+    # 每次评估前创建一个独立的子目录
+    eval_path = os.path.join(base_output_dir, f"eval_{dataset_name}")
+    if os.path.exists(eval_path):
+        shutil.rmtree(eval_path) # 清理旧的缓存文件
+    os.makedirs(eval_path)
+    
+    evaluator = COCOEvaluator(dataset_name, cfg, True, output_dir=eval_path)
+    loader = build_detection_test_loader(cfg, dataset_name)
+    
+    print(f"--- Running evaluation on {dataset_name} ---")
+    return inference_on_dataset(model, loader, evaluator)
+
+# 2. 调用
+cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5 # 推理阈值
+predictor = DefaultPredictor(cfg)
+# 评估验证集
+res_val = safe_evaluate(predictor.model, "tooth_val", cfg, os.path.join(output_dir, "pred_val"))
+# 评估训练集
+# %%
+res_train = safe_evaluate(predictor.model, "tooth_train", cfg, os.path.join(output_dir, "pred_train"))
+# %%
