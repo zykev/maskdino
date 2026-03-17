@@ -322,14 +322,14 @@ ANNOTATION_COLOR = (255, 0, 0)
 
 # 指定的可视化目标 (Label: (Sample_ID, View_ID))
 TARGETS_PLAQUE = {
-    "p0": ("s20251105", "S4"),
-    "p1": ("s20251114", "S2"),
+    "p0": ("s20251105", "S5"),
+    "p1": ("s20251077", "S2"),
     "p2": ("s20251111", "S6")
 }
 
 TARGETS_GINGIVITIS = {
-    "g0": ("s20251115", "S3"),
-    "g1": ("s20251149", "S2"),
+    "g0": ("s20251157", "S2"),
+    "g1": ("s20251114", "S1"),
     "g3": ("s20251047", "S2")
 }
 
@@ -361,7 +361,7 @@ def draw_polygons(img, json_path, target_label=None):
     for shape in data.get('shapes', []):
         label = str(shape.get('label'))
         # 牙菌斑模式：只画匹配的 p0, p1, p2
-        if target_label and label != target_label:
+        if target_label and label.lower() != target_label:
             continue
         pts = np.array(shape.get('points', []), np.int32)
         if pts.size > 0:
@@ -386,13 +386,12 @@ def visualize_specific_targets(target_dict, type_name):
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             
             # 牙菌斑可视化逻辑
+            if type_name == "Gingivitis":
+                pass
             if type_name == "Plaque":
                 # p0 通常代表健康/无菌斑，不画框；p1, p2 画对应框
                 if grade_key != "p0":
                     img = draw_polygons(img, json_p, target_label=grade_key)
-            else:
-                # 牙周炎可视化逻辑：画出所有病灶标注供参考
-                img = draw_polygons(img, json_p)
             
             ax.imshow(img)
             # 提取路径中的方向(F/L/R)用于标题显示
@@ -460,4 +459,64 @@ target_dirs = [
 
 if __name__ == "__main__":
     analyze_dental_folders(target_dirs)
+
+
+
+# %%
+import os
+from pathlib import Path
+
+def visualize_specific_targets(target_dict, type_name):
+    """
+    将每个等级的目标单独保存为图像文件到 tmp 文件夹
+    """
+    # 1. 确保目标目录存在
+    save_dir = "tmp"
+    os.makedirs(save_dir, exist_ok=True)
+    
+    keys = sorted(target_dict.keys())
+    
+    for grade_key in keys:
+        sample_id, view_id = target_dict[grade_key]
+        img_p, json_p = find_image_and_json(sample_id, view_id)
+        
+        # 为每一张图创建一个独立的画布
+        plt.figure(figsize=(6, 6))
+        
+        if img_p:
+            img = cv2.imread(img_p)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            # 牙菌斑 (Plaque) 与牙周炎 (Gingivitis) 可视化逻辑区分
+            if type_name == "Gingivitis":
+                pass
+            if type_name == "Plaque":
+                # p0 通常代表健康，不画框；p1, p2 画对应框
+                if grade_key != "p0":
+                    img = draw_polygons(img, json_p, target_label=grade_key)
+            
+            plt.imshow(img)
+            
+            # 提取路径中的方向(F/L/R)
+            # direction = Path(img_p).parts[-2] 
+            # plt.title(f"{type_name} - Grade: {grade_key}\nID: {sample_id}_{direction}_{view_id}", 
+            #           fontsize=10, fontweight='bold')
+        else:
+            plt.text(0.5, 0.5, f"Not Found:\n{sample_id}\n{view_id}", 
+                     ha='center', va='center', color='red')
+        
+        plt.axis('off')
+        
+        # 2. 构造独立的保存路径，例如: tmp/plaque_p1.png
+        output_filename = f"{type_name.lower()}_{grade_key}.png"
+        output_path = os.path.join(save_dir, output_filename)
+        
+        plt.savefig(output_path, dpi=200, bbox_inches='tight', pad_inches=0.1)
+        plt.close() # 必须关闭，防止内存溢出
+        print(f"已保存: {output_path}")
+
+if __name__ == "__main__":
+    # 执行可视化，图像将输出到 ./tmp/ 目录下
+    visualize_specific_targets(TARGETS_GINGIVITIS, "Gingivitis")
+    visualize_specific_targets(TARGETS_PLAQUE, "Plaque")
 # %%

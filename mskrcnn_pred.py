@@ -76,7 +76,7 @@ cfg.MODEL.WEIGHTS = model_weights # 关键：加载你跑好的模型
 # predictor = DefaultPredictor(cfg)
 
 # 获取验证集数据
-dataset_dicts_val = DatasetCatalog.get("tooth_val")
+dataset_dicts_val = DatasetCatalog.get("tooth_train")
 print(f"Loaded {len(dataset_dicts_val)} validation images.")
 
 # %% [2] 统计置信度分布 (Score Distribution)

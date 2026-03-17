@@ -98,8 +98,95 @@ def safe_evaluate(model, dataset_name, cfg, base_output_dir):
 
 # 2. 调用
 # 评估验证集
-res_val = safe_evaluate(predictor.model, "tooth_val", cfg, os.path.join(output_dir, "pred_val"))
+# res_val = safe_evaluate(predictor.model, "tooth_val", cfg, os.path.join(output_dir, "pred_val"))
 # 评估训练集
 # %%
 res_train = safe_evaluate(predictor.model, "tooth_train", cfg, os.path.join(output_dir, "pred_train"))
 # %%
+
+from tqdm import tqdm
+import pycocotools.mask as mask_util
+
+def calculate_pixel_metrics_per_class(predictor, dataset_name, class_names):
+    dataset_dicts = DatasetCatalog.get(dataset_name)
+    num_classes = len(class_names)
+    
+    # 初始化每个类别的混淆矩阵计数器 (使用 uint64 防止像素总数溢出)
+    TP = np.zeros(num_classes, dtype=np.uint64)
+    FP = np.zeros(num_classes, dtype=np.uint64)
+    TN = np.zeros(num_classes, dtype=np.uint64)
+    FN = np.zeros(num_classes, dtype=np.uint64)
+    
+    print(f"--- 正在计算 {dataset_name} 的像素级临床指标 ---")
+    
+    for d in tqdm(dataset_dicts):
+        # 读取原始图像
+        img = cv2.imread(d["file_name"])
+        height, width = img.shape[:2]
+        
+        # 1. 获取模型预测结果
+        outputs = predictor(img)
+        pred_instances = outputs["instances"].to("cpu")
+        pred_masks = pred_instances.pred_masks.numpy()    # 形状: (N, H, W)
+        pred_classes = pred_instances.pred_classes.numpy() # 形状: (N,)
+        
+        # 2. 解析 Ground Truth Masks
+        # 为每个类别创建一个空白的全图 Mask
+        gt_masks_per_class = {c: np.zeros((height, width), dtype=bool) for c in range(num_classes)}
+        
+        for ann in d["annotations"]:
+            cls_id = ann["category_id"]
+            if isinstance(ann["segmentation"], list):
+                # 处理 Polygon 格式
+                rles = mask_util.frPyObjects(ann["segmentation"], height, width)
+                rle = mask_util.merge(rles)
+                mask = mask_util.decode(rle).astype(bool)
+            elif isinstance(ann["segmentation"], dict):
+                # 处理 RLE 格式
+                mask = mask_util.decode(ann["segmentation"]).astype(bool)
+            
+            # 将同类别的多个 mask 合并到一个二维矩阵中
+            gt_masks_per_class[cls_id] = np.logical_or(gt_masks_per_class[cls_id], mask)
+            
+        # 3. 解析预测的 Masks
+        pred_masks_per_class = {c: np.zeros((height, width), dtype=bool) for c in range(num_classes)}
+        for i in range(len(pred_classes)):
+            cls_id = pred_classes[i]
+            mask = pred_masks[i]
+            pred_masks_per_class[cls_id] = np.logical_or(pred_masks_per_class[cls_id], mask)
+            
+        # 4. 逐类别对比 GT 和 Pred，累计像素
+        for c in range(num_classes):
+            gt = gt_masks_per_class[c]
+            pred = pred_masks_per_class[c]
+            
+            TP[c] += np.sum(gt & pred)
+            FP[c] += np.sum((~gt) & pred)
+            FN[c] += np.sum(gt & (~pred))
+            TN[c] += np.sum((~gt) & (~pred))
+
+    # 5. 计算最终指标并打印
+    print("\n" + "="*60)
+    print(f"{'Class Name':<25} | {'Sens(Recall)':<12} | {'Spec':<10} | {'F1-Score':<10} | {'Accuracy':<10}")
+    print("-" * 60)
+    
+    results = {}
+    for c in range(num_classes):
+        # 避免除以 0 的情况
+        sens = TP[c] / (TP[c] + FN[c]) if (TP[c] + FN[c]) > 0 else 0.0
+        spec = TN[c] / (TN[c] + FP[c]) if (TN[c] + FP[c]) > 0 else 0.0
+        acc  = (TP[c] + TN[c]) / (TP[c] + TN[c] + FP[c] + FN[c]) if (TP[c] + TN[c] + FP[c] + FN[c]) > 0 else 0.0
+        f1   = 2 * TP[c] / (2 * TP[c] + FP[c] + FN[c]) if (2 * TP[c] + FP[c] + FN[c]) > 0 else 0.0
+        
+        results[class_names[c]] = {
+            "Sensitivity": sens, "Specificity": spec, "F1-Score": f1, "Accuracy": acc
+        }
+        
+        print(f"{class_names[c]:<25} | {sens:<12.4f} | {spec:<10.4f} | {f1:<10.4f} | {acc:<10.4f}")
+    print("="*60 + "\n")
+    
+    return results
+
+# 执行评估
+# 注意：确保 predictor 已经被正确实例化并加载了 model_weights
+val_metrics = calculate_pixel_metrics_per_class(predictor, "tooth_train", CLASS_NAMES)
