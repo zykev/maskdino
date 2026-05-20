@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+import cv2
 from PIL import Image
 
 
@@ -285,8 +286,10 @@ def load_json(path: Path) -> dict:
 
 def image_size_from_file_or_json(image_path: Path | None, data: dict | None) -> tuple[int, int]:
     if image_path and image_path.exists():
-        with Image.open(image_path) as image:
-            return image.size
+        image = cv2.imread(str(image_path))
+        if image is not None:
+            height, width = image.shape[:2]
+            return width, height
 
     if data:
         width = int(data.get("imageWidth") or 0)

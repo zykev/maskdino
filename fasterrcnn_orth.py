@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-dir",
-        default=".datasets/intraoral_anno/orth_test",
+        default=".datasets/intraoral_anno/orth_test/orth_test",
         type=Path,
         help="Image root. COCO file_name entries are relative to this folder.",
     )
