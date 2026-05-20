@@ -1,4 +1,4 @@
-# %%
+
 import torch, detectron2
 from detectron2.utils.logger import setup_logger
 setup_logger()
@@ -23,7 +23,6 @@ from collections import defaultdict
 
 
 
-# %%
 def get_caries_dicts(root_dir, is_train=False, keep_healthy_ratio=0.1, in_eval=False):
     """
     img_dir: 包含 single_tooth 文件夹的根目录
@@ -588,7 +587,7 @@ if __name__ == "__main__":
 
     output_dir = "output/maskrcnn_caries_v3"
     cfg = setup(output_dir)
-    data_root = ".datasets/intraoral/single_ch_0225"
+    data_root = ".datasets/intraoral_anno/single_ch_0225"
     tooth_metadata = setup_dataset(data_root)
     trainer = Trainer(cfg) 
     trainer.resume_or_load(resume=False)

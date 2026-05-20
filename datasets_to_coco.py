@@ -6,7 +6,7 @@ from datetime import datetime
 
 # ================= 配置区域 =================
 # 根目录路径 (你的 single_tooth 文件夹路径)
-root = ".datasets/intraoral/single_ch_0225"
+root = ".datasets/intraoral_anno/single_ch_0225"
 ROOT_DIR = os.path.join(root, "single_tooth") 
 # 输出的 COCO json 文件路径
 OUTPUT_JSON = os.path.join(root, "caries_sample_dataset.json")

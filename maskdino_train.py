@@ -138,7 +138,7 @@ def register_caries_dataset():
     ]
     
     # 修改为你的实际数据路径
-    data_root = ".datasets/intraoral/annosample_ch"
+    data_root = ".datasets/intraoral_anno/single_ch_0225"
 
     for d in ["train", "val"]:
         dataset_name = "tooth_" + d
