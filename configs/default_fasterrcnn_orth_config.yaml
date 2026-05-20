@@ -1,5 +1,5 @@
 MODEL:
-  WEIGHTS: detectron2://COCO-Detection/faster_rcnn_R_50_FPN_3x/137849458/model_final_280758.pkl
+  WEIGHTS: .checkpoints/intraoral/model_final_280758.pkl #detectron2://COCO-Detection/faster_rcnn_R_50_FPN_3x/137849458/model_final_280758.pkl
   ROI_HEADS:
     # fasterrcnn_orth.py reads the actual class count from the train COCO JSON
     # and overwrites NUM_CLASSES automatically.
