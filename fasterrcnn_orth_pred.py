@@ -47,6 +47,13 @@ def parse_args() -> argparse.Namespace:
         type=Path,
     )
     parser.add_argument(
+        "--eval-splits",
+        nargs="+",
+        default=["train", "test"],
+        choices=["train", "test"],
+        help="Dataset splits to evaluate. Defaults to both train_json and test_json.",
+    )
+    parser.add_argument(
         "--weights",
         default="output/fasterrcnn_orth/model_final.pth",
         help="Trained checkpoint path.",
@@ -58,7 +65,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--score-thresh", default=0.05, type=float)
     parser.add_argument("--vis-score-thresh", default=0.5, type=float)
-    parser.add_argument("--vis-samples", default=32, type=int)
+    parser.add_argument(
+        "--vis-samples",
+        default=32,
+        type=int,
+        help="Maximum GT/Pred visualization images to save per class.",
+    )
     parser.add_argument("--seed", default=42, type=int)
     return parser.parse_args()
 
@@ -121,16 +133,21 @@ def make_cfg(args: argparse.Namespace, num_classes: int):
     return cfg
 
 
-def run_coco_eval(cfg) -> dict:
+def run_coco_eval(cfg, dataset_name: str, output_dir: Path) -> dict:
     predictor = DefaultPredictor(cfg)
-    evaluator = COCOEvaluator("orth_val", output_dir=os.path.join(cfg.OUTPUT_DIR, "inference"))
-    val_loader = build_detection_test_loader(cfg, "orth_val")
+    evaluator = COCOEvaluator(dataset_name, output_dir=str(output_dir / "inference"))
+    val_loader = build_detection_test_loader(cfg, dataset_name)
     results = inference_on_dataset(predictor.model, val_loader, evaluator)
     print(results)
     return results
 
 
-def save_score_distribution(cfg, dataset_dicts: list[dict], class_names: list[str]) -> None:
+def save_score_distribution(
+    cfg,
+    dataset_dicts: list[dict],
+    class_names: list[str],
+    output_dir: Path,
+) -> None:
     cfg = cfg.clone()
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.05
     predictor = DefaultPredictor(cfg)
@@ -170,11 +187,17 @@ def save_score_distribution(cfg, dataset_dicts: list[dict], class_names: list[st
         plt.ylabel("Count")
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(Path(cfg.OUTPUT_DIR) / "confidence_score_distribution.png")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_dir / "confidence_score_distribution.png")
     plt.close()
 
 
-def save_iou_report(cfg, dataset_dicts: list[dict], class_names: list[str]) -> None:
+def save_iou_report(
+    cfg,
+    dataset_dicts: list[dict],
+    class_names: list[str],
+    output_dir: Path,
+) -> None:
     cfg = cfg.clone()
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.05
     predictor = DefaultPredictor(cfg)
@@ -228,14 +251,77 @@ def save_iou_report(cfg, dataset_dicts: list[dict], class_names: list[str]) -> N
         print(f"{class_name:<20} {len(values):>6} {avg_iou:>8.4f} {max_iou:>8.4f} {match_rate:>10.2%}")
         lines.append(f"{class_name},{len(values)},{avg_iou:.6f},{max_iou:.6f},{match_rate:.6f}")
 
-    report_path = Path(cfg.OUTPUT_DIR) / "iou_summary.csv"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "iou_summary.csv"
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def select_samples_per_class(
+    dataset_dicts: list[dict],
+    num_classes: int,
+    limit: int,
+    seed: int,
+) -> dict[int, list[dict]]:
+    rng = random.Random(seed)
+    records_by_class: dict[int, list[dict]] = defaultdict(list)
+    for record in dataset_dicts:
+        class_ids = {ann["category_id"] for ann in record.get("annotations", [])}
+        for cls_id in class_ids:
+            if 0 <= cls_id < num_classes:
+                records_by_class[cls_id].append(record)
+            else:
+                print(f"  skipped invalid GT class id {cls_id} in image {record['image_id']}")
+
+    samples_by_class: dict[int, list[dict]] = {}
+    print("\nVisualization samples per class")
+    for records in records_by_class.values():
+        rng.shuffle(records)
+
+    for cls_id in range(num_classes):
+        candidates = records_by_class.get(cls_id, [])
+        samples_by_class[cls_id] = candidates[: min(limit, len(candidates))]
+        if not candidates:
+            print(f"  class {cls_id}: 0 GT images, skipped")
+        elif len(candidates) < limit:
+            print(f"  class {cls_id}: only {len(candidates)} GT images, saved all")
+        else:
+            print(f"  class {cls_id}: saved {limit} of {len(candidates)} GT images")
+
+    return samples_by_class
+
+
+def safe_path_name(name: str) -> str:
+    safe_name = "".join(char if char.isalnum() or char in "._-" else "_" for char in name)
+    return safe_name.strip("._") or "class"
+
+
+def add_panel_title(image_rgb: np.ndarray, title: str) -> np.ndarray:
+    header_height = 36
+    titled = np.full(
+        (image_rgb.shape[0] + header_height, image_rgb.shape[1], 3),
+        255,
+        dtype=np.uint8,
+    )
+    titled[header_height:, :, :] = image_rgb
+    cv2.putText(
+        titled,
+        title,
+        (12, 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (20, 20, 20),
+        2,
+        cv2.LINE_AA,
+    )
+    return titled
 
 
 def save_visualizations(
     cfg,
     dataset_dicts: list[dict],
     metadata,
+    class_names: list[str],
+    output_dir: Path,
     limit: int,
     score_thresh: float,
     seed: int,
@@ -247,22 +333,83 @@ def save_visualizations(
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_thresh
     predictor = DefaultPredictor(cfg)
 
-    random.seed(seed)
-    samples = random.sample(dataset_dicts, min(limit, len(dataset_dicts)))
-    output_dir = Path(cfg.OUTPUT_DIR) / "visualizations"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    samples_by_class = select_samples_per_class(dataset_dicts, len(class_names), limit, seed)
+    visualization_dir = output_dir / "visualizations"
+    class_output_dir = visualization_dir / "by_class"
+    class_output_dir.mkdir(parents=True, exist_ok=True)
+    visualizations_by_image_id: dict[int, np.ndarray] = {}
 
-    for index, record in enumerate(samples):
-        image = cv2.imread(record["file_name"])
-        if image is None:
-            continue
-        with torch.no_grad():
-            outputs = predictor(image)
-        visualizer = Visualizer(image[:, :, ::-1], metadata=metadata, scale=0.8)
-        vis = visualizer.draw_instance_predictions(outputs["instances"].to("cpu"))
-        cv2.imwrite(str(output_dir / f"orth_pred_{index:03d}.jpg"), vis.get_image()[:, :, ::-1])
+    for cls_id, samples in samples_by_class.items():
+        per_class_dir = class_output_dir / f"{cls_id:02d}_{safe_path_name(class_names[cls_id])}"
+        per_class_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Saved visualizations to {output_dir}")
+        for index, record in enumerate(samples):
+            image_id = record["image_id"]
+            comparison = visualizations_by_image_id.get(image_id)
+            if comparison is None:
+                image = cv2.imread(record["file_name"])
+                if image is None:
+                    print(f"Could not read image for visualization: {record['file_name']}")
+                    continue
+                with torch.no_grad():
+                    outputs = predictor(image)
+
+                image_rgb = image[:, :, ::-1]
+                gt_visualizer = Visualizer(image_rgb, metadata=metadata, scale=0.8)
+                pred_visualizer = Visualizer(image_rgb, metadata=metadata, scale=0.8)
+                gt_vis = gt_visualizer.draw_dataset_dict(record).get_image()
+                pred_vis = pred_visualizer.draw_instance_predictions(outputs["instances"].to("cpu")).get_image()
+
+                gt_panel = add_panel_title(gt_vis, "GT")
+                pred_panel = add_panel_title(pred_vis, f"Pred score>={score_thresh:g}")
+                separator = np.full((gt_panel.shape[0], 8, 3), 255, dtype=np.uint8)
+                comparison = np.concatenate([gt_panel, separator, pred_panel], axis=1)
+                visualizations_by_image_id[image_id] = comparison
+
+            gt_class_ids = sorted(
+                {
+                    ann["category_id"]
+                    for ann in record.get("annotations", [])
+                    if 0 <= ann["category_id"] < len(class_names)
+                }
+            )
+            class_suffix = "_".join(class_names[gt_cls_id] for gt_cls_id in gt_class_ids) or "negative"
+            filename = f"orth_gt_pred_{index:03d}_image_{image_id}_{safe_path_name(class_suffix)}.jpg"
+            cv2.imwrite(str(per_class_dir / filename), comparison[:, :, ::-1])
+
+    print(f"Saved visualizations to {visualization_dir}")
+
+
+def evaluate_split(
+    cfg,
+    split_name: str,
+    dataset_name: str,
+    data_dir: Path,
+    json_path: Path,
+    class_names: list[str],
+    seed: int,
+    vis_samples: int,
+    vis_score_thresh: float,
+) -> None:
+    print(f"\nEvaluating {split_name} split: {json_path}")
+    split_output_dir = Path(cfg.OUTPUT_DIR) / split_name
+    split_output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_dicts = load_coco_dicts(data_dir, json_path)
+    metadata = MetadataCatalog.get(dataset_name)
+
+    run_coco_eval(cfg, dataset_name, split_output_dir)
+    save_score_distribution(cfg, dataset_dicts, class_names, split_output_dir)
+    save_iou_report(cfg, dataset_dicts, class_names, split_output_dir)
+    save_visualizations(
+        cfg,
+        dataset_dicts,
+        metadata,
+        class_names,
+        split_output_dir,
+        limit=vis_samples,
+        score_thresh=vis_score_thresh,
+        seed=seed,
+    )
 
 
 def main() -> None:
@@ -279,20 +426,23 @@ def main() -> None:
         seed=args.seed,
     )
 
-    dataset_dicts_val = load_coco_dicts(args.data_dir, args.test_json)
-    metadata = MetadataCatalog.get("orth_val")
-
-    run_coco_eval(cfg)
-    save_score_distribution(cfg, dataset_dicts_val, class_names)
-    save_iou_report(cfg, dataset_dicts_val, class_names)
-    save_visualizations(
-        cfg,
-        dataset_dicts_val,
-        metadata,
-        limit=args.vis_samples,
-        score_thresh=args.vis_score_thresh,
-        seed=args.seed,
-    )
+    split_configs = {
+        "train": ("orth_train", args.train_json),
+        "test": ("orth_val", args.test_json),
+    }
+    for split_name in args.eval_splits:
+        dataset_name, json_path = split_configs[split_name]
+        evaluate_split(
+            cfg,
+            split_name,
+            dataset_name,
+            args.data_dir,
+            json_path,
+            class_names,
+            seed=args.seed,
+            vis_samples=args.vis_samples,
+            vis_score_thresh=args.vis_score_thresh,
+        )
 
 
 if __name__ == "__main__":
