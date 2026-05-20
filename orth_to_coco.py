@@ -30,6 +30,205 @@ from PIL import Image
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
+# Fixed IOTN/DHC categories read from tmp/a.jpg and tmp/b.jpg.
+# LabelMe shape labels should use the short code, e.g. "3a" or "4d".
+CATEGORIES_INFO = [
+    {
+        "id": 1,
+        "name": "1",
+        "supercategory": "minor_malocclusion",
+        "description": "Extremely minor malocclusions including contact point displacement less than 1 mm",
+    },
+    {
+        "id": 2,
+        "name": "2a",
+        "supercategory": "increased_overjet",
+        "description": "Increased overjet greater than 3.5 mm but up to 6 mm with competent lips",
+    },
+    {
+        "id": 3,
+        "name": "2b",
+        "supercategory": "reverse_overjet",
+        "description": "Reverse overjet greater than 0 mm but up to 1 mm",
+    },
+    {
+        "id": 4,
+        "name": "2c",
+        "supercategory": "crossbite",
+        "description": "Crossbite with up to 1 mm discrepancy",
+    },
+    {
+        "id": 5,
+        "name": "2d",
+        "supercategory": "displacement_of_contact_point",
+        "description": "Contact point displacement greater than 1 mm but up to 2 mm",
+    },
+    {
+        "id": 6,
+        "name": "2e",
+        "supercategory": "open_bite",
+        "description": "Anterior or posterior open bite greater than 1 mm but up to 2 mm",
+    },
+    {
+        "id": 7,
+        "name": "2f",
+        "supercategory": "deepbite",
+        "description": "Increased overbite at least 3.5 mm without gingival contact",
+    },
+    {
+        "id": 8,
+        "name": "2g",
+        "supercategory": "molar_relationship",
+        "description": "Pre-normal or post-normal occlusions with no other anomalies",
+    },
+    {
+        "id": 9,
+        "name": "3a",
+        "supercategory": "increased_overjet",
+        "description": "Increased overjet greater than 3.5 mm but up to 6 mm with incompetent lips",
+    },
+    {
+        "id": 10,
+        "name": "3b",
+        "supercategory": "reverse_overjet",
+        "description": "Reverse overjet greater than 1 mm but up to 3.5 mm",
+    },
+    {
+        "id": 11,
+        "name": "3c",
+        "supercategory": "crossbite",
+        "description": "Crossbite with greater than 1 mm but up to 2 mm discrepancy",
+    },
+    {
+        "id": 12,
+        "name": "3d",
+        "supercategory": "displacement_of_contact_point",
+        "description": "Contact point displacement greater than 2 mm but up to 4 mm",
+    },
+    {
+        "id": 13,
+        "name": "3e",
+        "supercategory": "open_bite",
+        "description": "Lateral or anterior open bite greater than 2 mm but up to 4 mm",
+    },
+    {
+        "id": 14,
+        "name": "3f",
+        "supercategory": "deepbite",
+        "description": "Deep overbite complete on gingival or palatal tissues but no trauma",
+    },
+    {
+        "id": 15,
+        "name": "4a",
+        "supercategory": "increased_overjet",
+        "description": "Increased overjet greater than 6 mm but up to 9 mm",
+    },
+    {
+        "id": 16,
+        "name": "4b",
+        "supercategory": "reverse_overjet",
+        "description": "Reverse overjet greater than 3.5 mm with no masticatory or speech difficulties",
+    },
+    {
+        "id": 17,
+        "name": "4c",
+        "supercategory": "crossbite",
+        "description": "Crossbite with greater than 2 mm discrepancy between retruded and intercuspal position",
+    },
+    {
+        "id": 18,
+        "name": "4d",
+        "supercategory": "displacement_of_contact_point",
+        "description": "Severe contact point displacement greater than 4 mm",
+    },
+    {
+        "id": 19,
+        "name": "4e",
+        "supercategory": "open_bite",
+        "description": "Extreme lateral or anterior open bite greater than 4 mm",
+    },
+    {
+        "id": 20,
+        "name": "4f",
+        "supercategory": "deepbite",
+        "description": "Increased and complete overbite with gingival or palatal trauma",
+    },
+    {
+        "id": 21,
+        "name": "4g",
+        "supercategory": "molar_relationship",
+        "description": "Severe pre-normal or post-normal occlusion",
+    },
+    {
+        "id": 22,
+        "name": "4h",
+        "supercategory": "missing_teeth",
+        "description": "Less extensive hypodontia requiring pre-restorative orthodontics or space closure",
+    },
+    {
+        "id": 23,
+        "name": "4l",
+        "supercategory": "crossbite",
+        "description": "Posterior lingual crossbite with no functional occlusal contact",
+    },
+    {
+        "id": 24,
+        "name": "4m",
+        "supercategory": "reverse_overjet",
+        "description": "Reverse overjet greater than 1 mm but less than 3.5 mm with recorded difficulties",
+    },
+    {
+        "id": 25,
+        "name": "4t",
+        "supercategory": "displacement_of_contact_point",
+        "description": "Partially erupted, tipped, and impacted teeth",
+    },
+    {
+        "id": 26,
+        "name": "4x",
+        "supercategory": "displacement_of_contact_point",
+        "description": "Presence of supernumerary teeth",
+    },
+    {
+        "id": 27,
+        "name": "5a",
+        "supercategory": "increased_overjet",
+        "description": "Increased overjet greater than 9 mm",
+    },
+    {
+        "id": 28,
+        "name": "5h",
+        "supercategory": "missing_teeth",
+        "description": "Extensive hypodontia with restorative implications",
+    },
+    {
+        "id": 29,
+        "name": "5i",
+        "supercategory": "missing_teeth",
+        "description": "Impeded eruption of teeth except third molars",
+    },
+    {
+        "id": 30,
+        "name": "5m",
+        "supercategory": "reverse_overjet",
+        "description": "Reverse overjet greater than 3.5 mm with reported masticatory and speech difficulties",
+    },
+    {
+        "id": 31,
+        "name": "5p",
+        "supercategory": "cleft_lip_palate",
+        "description": "Defects of cleft lip and palate and other craniofacial anomalies",
+    },
+    {
+        "id": 32,
+        "name": "5s",
+        "supercategory": "missing_teeth",
+        "description": "Submerged deciduous teeth",
+    },
+]
+
+CATEGORY_MAP = {category["name"]: category["id"] for category in CATEGORIES_INFO}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -52,8 +251,8 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=None,
         help=(
-            "Optional fixed label order. If omitted, labels are inferred from "
-            "all JSON files and naturally sorted."
+            "Optional custom label order. If omitted, the fixed IOTN/DHC "
+            "CATEGORIES_INFO table in this file is used."
         ),
     )
     parser.add_argument(
@@ -62,6 +261,17 @@ def parse_args() -> argparse.Namespace:
         help="Do not include images without valid annotations.",
     )
     return parser.parse_args()
+
+
+def categories_from_labels(labels: list[str] | None) -> tuple[dict[str, int], list[dict]]:
+    if labels is None:
+        return CATEGORY_MAP, CATEGORIES_INFO
+
+    categories = [
+        {"id": index + 1, "name": label, "supercategory": "orthodontic_anomaly"}
+        for index, label in enumerate(labels)
+    ]
+    return {category["name"]: category["id"] for category in categories}, categories
 
 
 def natural_key(text: str) -> list[object]:
@@ -181,8 +391,7 @@ def convert_to_coco(
     drop_empty_images: bool,
 ) -> None:
     data_dir = data_dir.resolve()
-    labels = labels or infer_labels(data_dir)
-    label_to_category_id = {label: index + 1 for index, label in enumerate(labels)}
+    label_to_category_id, categories_info = categories_from_labels(labels)
 
     coco = {
         "info": {
@@ -194,10 +403,7 @@ def convert_to_coco(
         "licenses": [],
         "images": [],
         "annotations": [],
-        "categories": [
-            {"id": category_id, "name": label, "supercategory": "orthodontic_anomaly"}
-            for label, category_id in label_to_category_id.items()
-        ],
+        "categories": categories_info,
     }
 
     image_id = 1
@@ -279,7 +485,7 @@ def convert_to_coco(
     print(f"Saved COCO JSON to {output_json}")
     print(f"Images: {len(coco['images'])}")
     print(f"Annotations: {len(coco['annotations'])}")
-    print(f"Categories: {len(coco['categories'])} -> {labels}")
+    print(f"Categories: {len(coco['categories'])} -> {[c['name'] for c in coco['categories']]}")
     if skipped_shapes:
         print(f"Skipped invalid/unknown shapes: {skipped_shapes}")
 

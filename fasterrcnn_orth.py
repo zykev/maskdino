@@ -24,6 +24,12 @@ from detectron2.utils.visualizer import Visualizer
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Faster R-CNN training for tooth anomaly detection.")
     parser.add_argument(
+        "--config-file",
+        default="default_fasterrcnn_orth_config.yaml",
+        type=Path,
+        help="Local Detectron2 YAML with tunable Faster R-CNN settings.",
+    )
+    parser.add_argument(
         "--data-dir",
         default=".datasets/intraoral_anno/orth_test/orth_test",
         type=Path,
@@ -43,16 +49,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="output/fasterrcnn_orth",
+        default=None,
         type=Path,
-        help="Training output directory.",
+        help="Training output directory. Overrides OUTPUT_DIR in --config-file.",
     )
-    parser.add_argument("--max-iter", default=10000, type=int)
-    parser.add_argument("--eval-period", default=500, type=int)
-    parser.add_argument("--ims-per-batch", default=2, type=int)
-    parser.add_argument("--base-lr", default=0.0025, type=float)
-    parser.add_argument("--num-workers", default=4, type=int)
-    parser.add_argument("--score-thresh", default=0.5, type=float)
+    parser.add_argument("--max-iter", default=None, type=int, help="Overrides SOLVER.MAX_ITER.")
+    parser.add_argument("--eval-period", default=None, type=int, help="Overrides TEST.EVAL_PERIOD.")
+    parser.add_argument("--ims-per-batch", default=None, type=int, help="Overrides SOLVER.IMS_PER_BATCH.")
+    parser.add_argument("--base-lr", default=None, type=float, help="Overrides SOLVER.BASE_LR.")
+    parser.add_argument("--num-workers", default=None, type=int, help="Overrides DATALOADER.NUM_WORKERS.")
+    parser.add_argument("--score-thresh", default=None, type=float, help="Overrides MODEL.ROI_HEADS.SCORE_THRESH_TEST.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--eval-only",
@@ -97,40 +103,38 @@ def register_datasets(data_dir: Path, train_json: Path, test_json: Path) -> list
 def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg = get_cfg()
     cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml"))
+    if args.config_file:
+        cfg.merge_from_file(str(args.config_file))
 
     cfg.DATASETS.TRAIN = ("orth_train",)
     cfg.DATASETS.TEST = ("orth_val",)
-    cfg.DATALOADER.NUM_WORKERS = args.num_workers
-    cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False
-    cfg.DATALOADER.SAMPLER_TRAIN = "RepeatFactorTrainingSampler"
-    cfg.DATALOADER.REPEAT_THRESHOLD = 0.1
+    if args.num_workers is not None:
+        cfg.DATALOADER.NUM_WORKERS = args.num_workers
 
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
-    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 256
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = args.score_thresh
+    if args.score_thresh is not None:
+        cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = args.score_thresh
 
-    cfg.MODEL.ANCHOR_GENERATOR.SIZES = [[16, 32, 64, 128, 256]]
-    cfg.INPUT.MIN_SIZE_TRAIN = (640, 800, 1024)
-    cfg.INPUT.MAX_SIZE_TRAIN = 1333
-    cfg.INPUT.MIN_SIZE_TEST = 800
-    cfg.INPUT.MAX_SIZE_TEST = 1333
+    if args.ims_per_batch is not None:
+        cfg.SOLVER.IMS_PER_BATCH = args.ims_per_batch
+    if args.base_lr is not None:
+        cfg.SOLVER.BASE_LR = args.base_lr
+    if args.max_iter is not None:
+        cfg.SOLVER.MAX_ITER = args.max_iter
+        cfg.SOLVER.STEPS = (int(args.max_iter * 0.7), int(args.max_iter * 0.9))
+        cfg.SOLVER.WARMUP_ITERS = min(1000, max(1, args.max_iter // 20))
+    if args.eval_period is not None:
+        cfg.TEST.EVAL_PERIOD = args.eval_period
 
-    cfg.SOLVER.IMS_PER_BATCH = args.ims_per_batch
-    cfg.SOLVER.BASE_LR = args.base_lr
-    cfg.SOLVER.MAX_ITER = args.max_iter
-    cfg.SOLVER.STEPS = (int(args.max_iter * 0.7), int(args.max_iter * 0.9))
-    cfg.SOLVER.GAMMA = 0.1
-    cfg.SOLVER.WARMUP_ITERS = min(1000, max(1, args.max_iter // 20))
-    cfg.TEST.EVAL_PERIOD = args.eval_period
-
-    cfg.OUTPUT_DIR = str(args.output_dir)
+    if args.output_dir is not None:
+        cfg.OUTPUT_DIR = str(args.output_dir)
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
     if args.weights:
         cfg.MODEL.WEIGHTS = args.weights
     elif args.eval_only:
-        cfg.MODEL.WEIGHTS = str(args.output_dir / "model_final.pth")
-    else:
+        cfg.MODEL.WEIGHTS = str(Path(cfg.OUTPUT_DIR) / "model_final.pth")
+    elif not cfg.MODEL.WEIGHTS:
         cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
             "COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml"
         )
