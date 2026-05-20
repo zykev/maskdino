@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Faster R-CNN training for tooth anomaly detection.")
     parser.add_argument(
         "--config-file",
-        default="default_fasterrcnn_orth_config.yaml",
+        default="configs/default_fasterrcnn_orth_config.yaml",
         type=Path,
         help="Local Detectron2 YAML with tunable Faster R-CNN settings.",
     )
@@ -61,11 +61,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score-thresh", default=None, type=float, help="Overrides MODEL.ROI_HEADS.SCORE_THRESH_TEST.")
     parser.add_argument(
         "--keep-negative-ratio",
-        default=1.0,
+        default=None,
         type=float,
         help=(
-            "Ratio of empty-annotation training images to keep as negative samples. "
-            "Use 1.0 to keep all fully aligned/normal teeth images."
+            "Overrides DATALOADER.KEEP_NEGATIVE_RATIO in --config-file. "
+            "Controls how many empty-annotation normal images are kept."
         ),
     )
     parser.add_argument(
@@ -202,6 +202,8 @@ def register_datasets(
 
 def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg = get_cfg()
+    cfg.DATALOADER.KEEP_NEGATIVE_RATIO = 0.5
+
     cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml"))
     if args.config_file:
         cfg.merge_from_file(str(args.config_file))
@@ -215,7 +217,9 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     if args.repeat_threshold is not None:
         cfg.DATALOADER.REPEAT_THRESHOLD = args.repeat_threshold
     elif cfg.DATALOADER.REPEAT_THRESHOLD <= 0:
-        cfg.DATALOADER.REPEAT_THRESHOLD = 0.1
+        cfg.DATALOADER.REPEAT_THRESHOLD = 0.05
+    if args.keep_negative_ratio is not None:
+        cfg.DATALOADER.KEEP_NEGATIVE_RATIO = args.keep_negative_ratio
 
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
     if args.score_thresh is not None:
@@ -292,14 +296,15 @@ def save_visualizations(cfg, limit: int) -> None:
 def main() -> None:
     setup_logger()
     args = parse_args()
-    class_names = register_datasets(
+    class_names = load_categories(args.train_json)
+    cfg = build_cfg(args, num_classes=len(class_names))
+    register_datasets(
         args.data_dir,
         args.train_json,
         args.test_json,
-        keep_negative_ratio=args.keep_negative_ratio,
+        keep_negative_ratio=cfg.DATALOADER.KEEP_NEGATIVE_RATIO,
         seed=args.seed,
     )
-    cfg = build_cfg(args, num_classes=len(class_names))
 
     if args.eval_only:
         evaluate(cfg)

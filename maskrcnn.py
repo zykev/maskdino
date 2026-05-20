@@ -92,10 +92,12 @@ def get_caries_dicts(root_dir, is_train=False, keep_healthy_ratio=0.1, in_eval=F
     return dataset_dicts
 
 
-def setup(output_dir):
+def setup(output_dir, config_file="configs/default_maskrcnn_config.yaml"):
     # 3. 配置训练参数
     cfg = get_cfg()
     cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
+    if config_file:
+        cfg.merge_from_file(config_file)
     cfg.DATASETS.TRAIN = ("tooth_train",)
     cfg.DATASETS.TEST = ("tooth_val",) # 这样可以在训练中进行评估
     cfg.DATALOADER.NUM_WORKERS = 4
