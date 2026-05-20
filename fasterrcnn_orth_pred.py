@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--weights",
-        default="output/fasterrcnn_orth/model_final.pth",
+        default="output/fasterrcnn_orth_v1/model_final.pth",
         help="Trained checkpoint path.",
     )
     parser.add_argument(

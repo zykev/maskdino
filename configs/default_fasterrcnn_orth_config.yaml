@@ -43,4 +43,4 @@ SOLVER:
 TEST:
   EVAL_PERIOD: 200
 
-OUTPUT_DIR: output/fasterrcnn_orth_v1
+OUTPUT_DIR: output/fasterrcnn_orth_v2
