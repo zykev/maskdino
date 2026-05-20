@@ -7,16 +7,20 @@ import argparse
 import json
 import os
 import random
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
+import numpy as np
 import torch
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
-from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_test_loader
+from detectron2.data import DatasetCatalog, DatasetMapper, MetadataCatalog, build_detection_test_loader
 from detectron2.engine import DefaultPredictor, DefaultTrainer
+from detectron2.engine.hooks import HookBase
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset
 from detectron2.structures import BoxMode
+import detectron2.utils.comm as comm
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
 
@@ -251,12 +255,64 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     return cfg
 
 
+class LossEvalHook(HookBase):
+    def __init__(self, eval_period: int, model, data_loader):
+        self._period = eval_period
+        self._model = model
+        self._data_loader = data_loader
+
+    def _get_loss(self, data):
+        metrics_dict = self._model(data)
+        metrics_dict = {
+            key: value.detach().cpu().item() if isinstance(value, torch.Tensor) else float(value)
+            for key, value in metrics_dict.items()
+        }
+        total_loss = sum(metrics_dict.values())
+        return total_loss, metrics_dict
+
+    def _do_loss_eval(self):
+        losses = []
+        loss_by_name: dict[str, list[float]] = defaultdict(list)
+
+        self._model.train()
+        with torch.no_grad():
+            for inputs in self._data_loader:
+                total_loss, metrics_dict = self._get_loss(inputs)
+                losses.append(total_loss)
+                for name, value in metrics_dict.items():
+                    loss_by_name[name].append(value)
+
+        mean_loss = float(np.mean(losses)) if losses else 0.0
+        self.trainer.storage.put_scalar("validation_loss", mean_loss)
+        for name, values in loss_by_name.items():
+            self.trainer.storage.put_scalar(f"val_{name}", float(np.mean(values)))
+
+        print(f"\n[LossEvalHook] iter {self.trainer.iter}: validation_loss = {mean_loss:.4f}\n")
+        comm.synchronize()
+
+    def after_step(self):
+        next_iter = self.trainer.iter + 1
+        is_final = next_iter == self.trainer.max_iter
+        if is_final or (self._period > 0 and next_iter % self._period == 0):
+            self._do_loss_eval()
+
+
 class Trainer(DefaultTrainer):
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
         return COCOEvaluator(dataset_name, output_dir=output_folder)
+
+    def build_hooks(self):
+        hooks = super().build_hooks()
+        val_loader = build_detection_test_loader(
+            self.cfg,
+            self.cfg.DATASETS.TEST[0],
+            mapper=DatasetMapper(self.cfg, is_train=True),
+        )
+        hooks.insert(-1, LossEvalHook(self.cfg.TEST.EVAL_PERIOD, self.model, val_loader))
+        return hooks
 
 
 def evaluate(cfg) -> dict:
