@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Faster R-CNN training for tooth anomaly detection.")
     parser.add_argument(
         "--data-dir",
-        default=".datasets/intraoral_anno/orth_test",
+        default=".datasets/intraoral_anno/orth_test/orth_test",
         type=Path,
         help="Image root. COCO file_name entries are relative to this folder.",
     )
