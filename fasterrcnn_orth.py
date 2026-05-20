@@ -14,9 +14,9 @@ import torch
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_test_loader
-from detectron2.data.datasets import register_coco_instances
 from detectron2.engine import DefaultPredictor, DefaultTrainer
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset
+from detectron2.structures import BoxMode
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
 
@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-dir",
-        default=".datasets/intraoral_anno/orth_test/orth_test",
+        default=".datasets/intraoral_anno/orth_test",
         type=Path,
         help="Image root. COCO file_name entries are relative to this folder.",
     )
@@ -59,6 +59,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-lr", default=None, type=float, help="Overrides SOLVER.BASE_LR.")
     parser.add_argument("--num-workers", default=None, type=int, help="Overrides DATALOADER.NUM_WORKERS.")
     parser.add_argument("--score-thresh", default=None, type=float, help="Overrides MODEL.ROI_HEADS.SCORE_THRESH_TEST.")
+    parser.add_argument(
+        "--keep-negative-ratio",
+        default=1.0,
+        type=float,
+        help=(
+            "Ratio of empty-annotation training images to keep as negative samples. "
+            "Use 1.0 to keep all fully aligned/normal teeth images."
+        ),
+    )
+    parser.add_argument(
+        "--repeat-threshold",
+        default=None,
+        type=float,
+        help="Overrides DATALOADER.REPEAT_THRESHOLD for RepeatFactorTrainingSampler.",
+    )
+    parser.add_argument("--seed", default=42, type=int, help="Random seed for negative-sample retention.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--eval-only",
@@ -85,7 +101,72 @@ def load_categories(json_path: Path) -> list[str]:
     return [category["name"] for category in sorted(data["categories"], key=lambda item: item["id"])]
 
 
-def register_datasets(data_dir: Path, train_json: Path, test_json: Path) -> list[str]:
+def get_orth_dicts(
+    data_dir: Path,
+    json_path: Path,
+    is_train: bool,
+    keep_negative_ratio: float,
+    seed: int,
+) -> list[dict]:
+    if not 0.0 <= keep_negative_ratio <= 1.0:
+        raise ValueError("--keep-negative-ratio must be between 0.0 and 1.0")
+
+    with json_path.open("r", encoding="utf-8") as f:
+        coco_data = json.load(f)
+
+    images = {image["id"]: image for image in coco_data["images"]}
+    annotations_by_image: dict[int, list[dict]] = {image_id: [] for image_id in images}
+    for annotation in coco_data["annotations"]:
+        annotations_by_image.setdefault(annotation["image_id"], []).append(annotation)
+
+    rng = random.Random(seed)
+    dataset_dicts: list[dict] = []
+    negative_count = 0
+    kept_negative_count = 0
+
+    for image_id, image_info in images.items():
+        anns = annotations_by_image.get(image_id, [])
+        if not anns:
+            negative_count += 1
+            if is_train and rng.random() > keep_negative_ratio:
+                continue
+            kept_negative_count += 1
+
+        record = {
+            "file_name": str(data_dir / image_info["file_name"]),
+            "image_id": image_id,
+            "height": image_info["height"],
+            "width": image_info["width"],
+            "annotations": [],
+        }
+
+        for ann in anns:
+            record["annotations"].append(
+                {
+                    "bbox": ann["bbox"],
+                    "bbox_mode": BoxMode.XYWH_ABS,
+                    "category_id": ann["category_id"] - 1,
+                    "iscrowd": ann.get("iscrowd", 0),
+                }
+            )
+
+        dataset_dicts.append(record)
+
+    split_name = "train" if is_train else "val"
+    print(
+        f"[orth_{split_name}] loaded {len(dataset_dicts)} images from {json_path}; "
+        f"kept {kept_negative_count}/{negative_count} empty negative samples"
+    )
+    return dataset_dicts
+
+
+def register_datasets(
+    data_dir: Path,
+    train_json: Path,
+    test_json: Path,
+    keep_negative_ratio: float,
+    seed: int,
+) -> list[str]:
     class_names = load_categories(train_json)
     for name, json_path in {
         "orth_train": train_json,
@@ -95,8 +176,27 @@ def register_datasets(data_dir: Path, train_json: Path, test_json: Path) -> list
             DatasetCatalog.remove(name)
         if name in MetadataCatalog.list():
             MetadataCatalog.remove(name)
-        register_coco_instances(name, {}, str(json_path), str(data_dir))
-        MetadataCatalog.get(name).set(thing_classes=class_names)
+
+        is_train = name == "orth_train"
+        DatasetCatalog.register(
+            name,
+            lambda json_path=json_path, is_train=is_train: get_orth_dicts(
+                data_dir=data_dir,
+                json_path=json_path,
+                is_train=is_train,
+                keep_negative_ratio=keep_negative_ratio,
+                seed=seed,
+            ),
+        )
+        MetadataCatalog.get(name).set(
+            thing_classes=class_names,
+            evaluator_type="coco",
+            json_file=str(json_path),
+            image_root=str(data_dir),
+            thing_dataset_id_to_contiguous_id={
+                category_id: category_id - 1 for category_id in range(1, len(class_names) + 1)
+            },
+        )
     return class_names
 
 
@@ -110,6 +210,12 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg.DATASETS.TEST = ("orth_val",)
     if args.num_workers is not None:
         cfg.DATALOADER.NUM_WORKERS = args.num_workers
+    cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False
+    cfg.DATALOADER.SAMPLER_TRAIN = "RepeatFactorTrainingSampler"
+    if args.repeat_threshold is not None:
+        cfg.DATALOADER.REPEAT_THRESHOLD = args.repeat_threshold
+    elif cfg.DATALOADER.REPEAT_THRESHOLD <= 0:
+        cfg.DATALOADER.REPEAT_THRESHOLD = 0.1
 
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
     if args.score_thresh is not None:
@@ -186,7 +292,13 @@ def save_visualizations(cfg, limit: int) -> None:
 def main() -> None:
     setup_logger()
     args = parse_args()
-    class_names = register_datasets(args.data_dir, args.train_json, args.test_json)
+    class_names = register_datasets(
+        args.data_dir,
+        args.train_json,
+        args.test_json,
+        keep_negative_ratio=args.keep_negative_ratio,
+        seed=args.seed,
+    )
     cfg = build_cfg(args, num_classes=len(class_names))
 
     if args.eval_only:
