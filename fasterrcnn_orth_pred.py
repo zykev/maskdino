@@ -110,6 +110,83 @@ def xywh_to_xyxy(boxes: list[list[float]]) -> list[list[float]]:
     return [[x, y, x + width, y + height] for x, y, width, height in boxes]
 
 
+def inspect_coco_json(json_path: Path, split_name: str) -> None:
+    with json_path.open("r", encoding="utf-8") as f:
+        coco_data = json.load(f)
+
+    images = {image["id"]: image for image in coco_data["images"]}
+    categories = sorted(coco_data["categories"], key=lambda item: item["id"])
+    category_ids = {category["id"] for category in categories}
+    annotations = coco_data["annotations"]
+    images_with_annotations = {ann["image_id"] for ann in annotations}
+    annotation_counts: dict[int, int] = defaultdict(int)
+    invalid_category_count = 0
+    invalid_bbox_count = 0
+    out_of_bounds_bbox_count = 0
+    missing_image_count = 0
+
+    for ann in annotations:
+        category_id = ann["category_id"]
+        if category_id not in category_ids:
+            invalid_category_count += 1
+        else:
+            annotation_counts[category_id] += 1
+
+        image_info = images.get(ann["image_id"])
+        if image_info is None:
+            missing_image_count += 1
+            continue
+
+        bbox = ann.get("bbox", [])
+        if len(bbox) != 4:
+            invalid_bbox_count += 1
+            continue
+        x, y, width, height = bbox
+        if width <= 0 or height <= 0:
+            invalid_bbox_count += 1
+        if x < 0 or y < 0 or x + width > image_info["width"] or y + height > image_info["height"]:
+            out_of_bounds_bbox_count += 1
+
+    empty_categories = [
+        category["name"]
+        for category in categories
+        if annotation_counts.get(category["id"], 0) == 0
+    ]
+
+    print(f"\n[{split_name}] COCO annotation sanity check")
+    print(
+        f"  images={len(images)} positives={len(images_with_annotations)} "
+        f"negatives={len(images) - len(images_with_annotations)} "
+        f"annotations={len(annotations)} categories={len(categories)}"
+    )
+    print(
+        f"  classes_with_gt={len(categories) - len(empty_categories)}/{len(categories)} "
+        f"empty_categories={empty_categories}"
+    )
+    print(
+        f"  invalid_categories={invalid_category_count} "
+        f"missing_images={missing_image_count} "
+        f"invalid_bboxes={invalid_bbox_count} "
+        f"out_of_bounds_bboxes={out_of_bounds_bbox_count}"
+    )
+
+
+def inspect_category_consistency(train_json: Path, test_json: Path) -> None:
+    with train_json.open("r", encoding="utf-8") as f:
+        train_categories = sorted(json.load(f)["categories"], key=lambda item: item["id"])
+    with test_json.open("r", encoding="utf-8") as f:
+        test_categories = sorted(json.load(f)["categories"], key=lambda item: item["id"])
+
+    train_pairs = [(category["id"], category["name"]) for category in train_categories]
+    test_pairs = [(category["id"], category["name"]) for category in test_categories]
+    if train_pairs == test_pairs:
+        print("\n[category_check] train/test category ids and names match.")
+    else:
+        print("\n[category_check] train/test category mismatch detected.")
+        print(f"  train={train_pairs}")
+        print(f"  test={test_pairs}")
+
+
 def make_cfg(args: argparse.Namespace, num_classes: int):
     train_args = argparse.Namespace(
         config_file=args.config_file,
@@ -259,6 +336,7 @@ def save_iou_report(
 def select_samples_per_class(
     dataset_dicts: list[dict],
     num_classes: int,
+    class_names: list[str],
     limit: int,
     seed: int,
 ) -> dict[int, list[dict]]:
@@ -280,12 +358,13 @@ def select_samples_per_class(
     for cls_id in range(num_classes):
         candidates = records_by_class.get(cls_id, [])
         samples_by_class[cls_id] = candidates[: min(limit, len(candidates))]
+        class_name = class_names[cls_id]
         if not candidates:
-            print(f"  class {cls_id}: 0 GT images, skipped")
+            print(f"  class {cls_id} ({class_name}): 0 GT images, skipped")
         elif len(candidates) < limit:
-            print(f"  class {cls_id}: only {len(candidates)} GT images, saved all")
+            print(f"  class {cls_id} ({class_name}): only {len(candidates)} GT images, saved all")
         else:
-            print(f"  class {cls_id}: saved {limit} of {len(candidates)} GT images")
+            print(f"  class {cls_id} ({class_name}): saved {limit} of {len(candidates)} GT images")
 
     return samples_by_class
 
@@ -333,7 +412,7 @@ def save_visualizations(
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_thresh
     predictor = DefaultPredictor(cfg)
 
-    samples_by_class = select_samples_per_class(dataset_dicts, len(class_names), limit, seed)
+    samples_by_class = select_samples_per_class(dataset_dicts, len(class_names), class_names, limit, seed)
     visualization_dir = output_dir / "visualizations"
     class_output_dir = visualization_dir / "by_class"
     class_output_dir.mkdir(parents=True, exist_ok=True)
@@ -415,6 +494,7 @@ def evaluate_split(
 def main() -> None:
     setup_logger()
     args = parse_args()
+    inspect_category_consistency(args.train_json, args.test_json)
     class_names = load_categories(args.train_json)
     cfg = make_cfg(args, num_classes=len(class_names))
 
@@ -432,6 +512,7 @@ def main() -> None:
     }
     for split_name in args.eval_splits:
         dataset_name, json_path = split_configs[split_name]
+        inspect_coco_json(json_path, split_name)
         evaluate_split(
             cfg,
             split_name,
