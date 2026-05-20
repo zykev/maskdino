@@ -131,8 +131,8 @@ def split_coco_dataset(input_json, train_out, test_out, ratio=0.8):
         print(f" - {cat['name']:<25}: Train={t_count:<4} Test={v_count:<4} (Train Ratio: {ratio_val:.1%})")
 
 if __name__ == "__main__":
-    INPUT = ".datasets/intraoral/single_ch_0225/caries_sample_dataset.json"
-    TRAIN = ".datasets/intraoral/single_ch_0225/caries_sample_dataset_train.json"
-    TEST = ".datasets/intraoral/single_ch_0225/caries_sample_dataset_test.json"
-    
+    INPUT = ".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset.json"
+    TRAIN = ".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_train.json"
+    TEST = ".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_test.json"
+
     split_coco_dataset(INPUT, TRAIN, TEST)
