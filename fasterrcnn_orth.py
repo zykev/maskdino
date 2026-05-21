@@ -324,29 +324,131 @@ def evaluate(cfg) -> dict:
     return results
 
 
+def select_samples_per_class(
+    dataset_dicts: list[dict],
+    num_classes: int,
+    class_names: list[str],
+    limit: int,
+    seed: int,
+) -> dict[int, list[dict]]:
+    rng = random.Random(seed)
+    records_by_class: dict[int, list[dict]] = defaultdict(list)
+    for record in dataset_dicts:
+        class_ids = {ann["category_id"] for ann in record.get("annotations", [])}
+        for cls_id in class_ids:
+            if 0 <= cls_id < num_classes:
+                records_by_class[cls_id].append(record)
+            else:
+                print(f"  skipped invalid GT class id {cls_id} in image {record['image_id']}")
+
+    samples_by_class: dict[int, list[dict]] = {}
+    print("\nVisualization samples per class")
+    for records in records_by_class.values():
+        rng.shuffle(records)
+
+    for cls_id in range(num_classes):
+        candidates = records_by_class.get(cls_id, [])
+        samples_by_class[cls_id] = candidates[: min(limit, len(candidates))]
+        class_name = class_names[cls_id]
+        if not candidates:
+            print(f"  class {cls_id} ({class_name}): 0 GT images, skipped")
+        elif len(candidates) < limit:
+            print(f"  class {cls_id} ({class_name}): only {len(candidates)} GT images, saved all")
+        else:
+            print(f"  class {cls_id} ({class_name}): saved {limit} of {len(candidates)} GT images")
+
+    return samples_by_class
+
+
+def safe_path_name(name: str) -> str:
+    safe_name = "".join(char if char.isalnum() or char in "._-" else "_" for char in name)
+    return safe_name.strip("._") or "class"
+
+
+def add_panel_title(image_rgb: np.ndarray, title: str) -> np.ndarray:
+    header_height = 36
+    titled = np.full(
+        (image_rgb.shape[0] + header_height, image_rgb.shape[1], 3),
+        255,
+        dtype=np.uint8,
+    )
+    titled[header_height:, :, :] = image_rgb
+    cv2.putText(
+        titled,
+        title,
+        (12, 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (20, 20, 20),
+        2,
+        cv2.LINE_AA,
+    )
+    return titled
+
+
 def save_visualizations(cfg, limit: int) -> None:
     if limit <= 0:
         return
 
     predictor = DefaultPredictor(cfg)
-    dataset_dicts = DatasetCatalog.get("orth_val")
-    metadata = MetadataCatalog.get("orth_val")
-    random.seed(42)
-    samples = random.sample(dataset_dicts, min(limit, len(dataset_dicts)))
-    output_dir = Path(cfg.OUTPUT_DIR) / "visualizations"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_name = cfg.DATASETS.TEST[0]
+    dataset_dicts = DatasetCatalog.get(dataset_name)
+    metadata = MetadataCatalog.get(dataset_name)
+    class_names = list(metadata.thing_classes)
+    samples_by_class = select_samples_per_class(
+        dataset_dicts,
+        len(class_names),
+        class_names,
+        limit,
+        seed=42,
+    )
+    visualization_dir = Path(cfg.OUTPUT_DIR) / "visualizations"
+    class_output_dir = visualization_dir / "by_class"
+    class_output_dir.mkdir(parents=True, exist_ok=True)
+    visualizations_by_image_id: dict[int, np.ndarray] = {}
 
-    for index, record in enumerate(samples):
-        image = cv2.imread(record["file_name"])
-        if image is None:
-            continue
-        outputs = predictor(image)
-        visualizer = Visualizer(image[:, :, ::-1], metadata=metadata, scale=0.8)
-        vis = visualizer.draw_instance_predictions(outputs["instances"].to("cpu"))
-        save_path = output_dir / f"orth_pred_{index:03d}.jpg"
-        cv2.imwrite(str(save_path), vis.get_image()[:, :, ::-1])
+    for cls_id, samples in samples_by_class.items():
+        per_class_dir = class_output_dir / f"{cls_id:02d}_{safe_path_name(class_names[cls_id])}"
+        per_class_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Saved visualizations to {output_dir}")
+        for index, record in enumerate(samples):
+            image_id = record["image_id"]
+            comparison = visualizations_by_image_id.get(image_id)
+            if comparison is None:
+                image = cv2.imread(record["file_name"])
+                if image is None:
+                    print(f"Could not read image for visualization: {record['file_name']}")
+                    continue
+                with torch.no_grad():
+                    outputs = predictor(image)
+
+                image_rgb = image[:, :, ::-1]
+                gt_visualizer = Visualizer(image_rgb, metadata=metadata, scale=0.8)
+                pred_visualizer = Visualizer(image_rgb, metadata=metadata, scale=0.8)
+                gt_vis = gt_visualizer.draw_dataset_dict(record).get_image()
+                pred_vis = pred_visualizer.draw_instance_predictions(outputs["instances"].to("cpu")).get_image()
+
+                gt_panel = add_panel_title(gt_vis, "GT")
+                pred_panel = add_panel_title(
+                    pred_vis,
+                    f"Pred score>={cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST:g}",
+                )
+                separator = np.full((gt_panel.shape[0], 8, 3), 255, dtype=np.uint8)
+                comparison = np.concatenate([gt_panel, separator, pred_panel], axis=1)
+                visualizations_by_image_id[image_id] = comparison
+
+            gt_class_ids = sorted(
+                {
+                    ann["category_id"]
+                    for ann in record.get("annotations", [])
+                    if 0 <= ann["category_id"] < len(class_names)
+                }
+            )
+            class_suffix = "_".join(class_names[gt_cls_id] for gt_cls_id in gt_class_ids) or "negative"
+            filename = f"orth_gt_pred_{index:03d}_image_{image_id}_{safe_path_name(class_suffix)}.jpg"
+            cv2.imwrite(str(per_class_dir / filename), comparison[:, :, ::-1])
+
+    print(f"Saved visualizations to {visualization_dir}")
 
 
 def main() -> None:

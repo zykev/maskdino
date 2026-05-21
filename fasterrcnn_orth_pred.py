@@ -110,7 +110,7 @@ def xywh_to_xyxy(boxes: list[list[float]]) -> list[list[float]]:
     return [[x, y, x + width, y + height] for x, y, width, height in boxes]
 
 
-def inspect_coco_json(json_path: Path, split_name: str) -> None:
+def inspect_coco_json(json_path: Path, split_name: str, output_dir: Path | None = None) -> None:
     with json_path.open("r", encoding="utf-8") as f:
         coco_data = json.load(f)
 
@@ -170,6 +170,38 @@ def inspect_coco_json(json_path: Path, split_name: str) -> None:
         f"out_of_bounds_bboxes={out_of_bounds_bbox_count}"
     )
 
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        class_names = [category["name"] for category in categories]
+        counts = [annotation_counts.get(category["id"], 0) for category in categories]
+        x_positions = np.arange(len(class_names))
+        plt.figure(figsize=(max(12, len(class_names) * 0.45), 7))
+        bars = plt.bar(x_positions, counts, color="steelblue", edgecolor="black", alpha=0.8)
+        plt.title(f"{split_name} GT Bounding Boxes per Category")
+        plt.xlabel("Category")
+        plt.ylabel("Bounding Box Count")
+        plt.xticks(x_positions, class_names, rotation=60, ha="right")
+        for bar, count in zip(bars, counts):
+            if count > 0:
+                plt.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    str(count),
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+        summary = (
+            f"Images: {len(images)}    "
+            f"Positive images: {len(images_with_annotations)}    "
+            f"Negative images: {len(images) - len(images_with_annotations)}    "
+            f"Annotations: {len(annotations)}"
+        )
+        plt.figtext(0.5, 0.01, summary, ha="center", fontsize=11)
+        plt.tight_layout(rect=[0, 0.06, 1, 1])
+        plt.savefig(output_dir / "annotation_category_histogram.png")
+        plt.close()
+
 
 def inspect_category_consistency(train_json: Path, test_json: Path) -> None:
     with train_json.open("r", encoding="utf-8") as f:
@@ -219,6 +251,30 @@ def run_coco_eval(cfg, dataset_name: str, output_dir: Path) -> dict:
     return results
 
 
+def save_coco_results_txt(results: dict, class_names: list[str], output_dir: Path) -> None:
+    bbox_results = results.get("bbox", {})
+    lines = ["COCO bbox evaluation", ""]
+    lines.append("Overall metrics")
+    for key in ["AP", "AP50", "AP75", "APs", "APm", "APl"]:
+        value = bbox_results.get(key, float("nan"))
+        try:
+            lines.append(f"{key}: {float(value):.6f}")
+        except (TypeError, ValueError):
+            lines.append(f"{key}: {value}")
+
+    lines.extend(["", "Per-category AP"])
+    for class_name in class_names:
+        key = f"AP-{class_name}"
+        value = bbox_results.get(key, float("nan"))
+        try:
+            lines.append(f"{class_name}: {float(value):.6f}")
+        except (TypeError, ValueError):
+            lines.append(f"{class_name}: {value}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "coco_bbox_results.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def save_score_distribution(
     cfg,
     dataset_dicts: list[dict],
@@ -255,7 +311,14 @@ def save_score_distribution(
         title = f"{class_name}\nGT={gt_counts_per_class[cls_id]} Pred={len(scores)}"
         if scores:
             plt.hist(scores, bins=30, color="skyblue", edgecolor="black", alpha=0.75)
-            plt.axvline(np.mean(scores), color="red", linestyle="dashed", linewidth=1)
+            plt.axvline(
+                np.median(scores),
+                color="red",
+                linestyle="dashed",
+                linewidth=1,
+                label="Median",
+            )
+            plt.legend(fontsize=8)
         else:
             plt.text(0.5, 0.5, "No Predictions", ha="center", va="center")
         plt.title(title)
@@ -280,8 +343,12 @@ def save_iou_report(
     predictor = DefaultPredictor(cfg)
 
     iou_stats_per_class: dict[int, list[float]] = defaultdict(list)
+    gt_counts_per_class: dict[int, int] = defaultdict(int)
 
     for record in dataset_dicts:
+        for ann in record.get("annotations", []):
+            gt_counts_per_class[ann["category_id"]] += 1
+
         image = cv2.imread(record["file_name"])
         if image is None:
             continue
@@ -312,11 +379,12 @@ def save_iou_report(
             elif pred_idx:
                 iou_stats_per_class[cls_id].extend([0.0] * len(pred_idx))
 
-    lines = ["Class,Predictions,AvgIoU,MaxIoU,MatchRateIoU>0.1"]
+    lines = ["Class,GTs,Predictions,AvgIoU,MaxIoU,MatchRateIoU>0.1"]
     print("\nIoU summary")
-    print(f"{'Class':<20} {'Pred':>6} {'AvgIoU':>8} {'MaxIoU':>8} {'Match>0.1':>10}")
+    print(f"{'Class':<20} {'GTs':>6} {'Pred':>6} {'AvgIoU':>8} {'MaxIoU':>8} {'Match>0.1':>10}")
     for cls_id, class_name in enumerate(class_names):
         values = iou_stats_per_class[cls_id]
+        gt_count = gt_counts_per_class[cls_id]
         if values:
             avg_iou = float(np.mean(values))
             max_iou = float(np.max(values))
@@ -325,8 +393,13 @@ def save_iou_report(
             avg_iou = 0.0
             max_iou = 0.0
             match_rate = 0.0
-        print(f"{class_name:<20} {len(values):>6} {avg_iou:>8.4f} {max_iou:>8.4f} {match_rate:>10.2%}")
-        lines.append(f"{class_name},{len(values)},{avg_iou:.6f},{max_iou:.6f},{match_rate:.6f}")
+        print(
+            f"{class_name:<20} {gt_count:>6} {len(values):>6} "
+            f"{avg_iou:>8.4f} {max_iou:>8.4f} {match_rate:>10.2%}"
+        )
+        lines.append(
+            f"{class_name},{gt_count},{len(values)},{avg_iou:.6f},{max_iou:.6f},{match_rate:.6f}"
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "iou_summary.csv"
@@ -473,10 +546,12 @@ def evaluate_split(
     print(f"\nEvaluating {split_name} split: {json_path}")
     split_output_dir = Path(cfg.OUTPUT_DIR) / split_name
     split_output_dir.mkdir(parents=True, exist_ok=True)
+    inspect_coco_json(json_path, split_name, split_output_dir)
     dataset_dicts = load_coco_dicts(data_dir, json_path)
     metadata = MetadataCatalog.get(dataset_name)
 
-    run_coco_eval(cfg, dataset_name, split_output_dir)
+    coco_results = run_coco_eval(cfg, dataset_name, split_output_dir)
+    save_coco_results_txt(coco_results, class_names, split_output_dir)
     save_score_distribution(cfg, dataset_dicts, class_names, split_output_dir)
     save_iou_report(cfg, dataset_dicts, class_names, split_output_dir)
     save_visualizations(
@@ -512,7 +587,6 @@ def main() -> None:
     }
     for split_name in args.eval_splits:
         dataset_name, json_path = split_configs[split_name]
-        inspect_coco_json(json_path, split_name)
         evaluate_split(
             cfg,
             split_name,
