@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import types
+import warnings
 import weakref
 from collections import OrderedDict
 from pathlib import Path
@@ -30,6 +31,7 @@ from detectron2.engine import (
     create_ddp_model,
     default_argument_parser,
     default_setup,
+    hooks,
     launch,
 )
 from detectron2.evaluation import COCOEvaluator, DatasetEvaluators, SemSegEvaluator, verify_results
@@ -37,8 +39,14 @@ from detectron2.modeling import build_model
 from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
 from detectron2.solver.build import maybe_add_gradient_clipping
 from detectron2.structures import BoxMode
+from detectron2.utils.events import EventWriter, JSONWriter, TensorboardXWriter, get_event_storage
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
 
 from datasets_coco.datasets_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
 from maskdino import (
@@ -50,6 +58,12 @@ from maskdino import (
     add_maskdino_config,
 )
 from maskdino.utils import box_ops
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"`torch\.cuda\.amp\.autocast\(args\.\.\.\)` is deprecated.*",
+    category=FutureWarning,
+)
 
 
 def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -73,6 +87,8 @@ def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--repeat_threshold", default=None, type=float)
     parser.add_argument("--vis_samples", default=8, type=int, help="Maximum visualizations per GT class.")
     parser.add_argument("--vis_score_thresh", default=0.5, type=float)
+    parser.add_argument("--log_period", default=100, type=int, help="Iteration interval for concise console logs.")
+    parser.add_argument("--no_tqdm", action="store_true", help="Disable the training progress bar.")
     parser.add_argument("--seed", default=42, type=int)
     return parser
 
@@ -202,6 +218,80 @@ def register_task_datasets(args, class_names: list[str]) -> None:
         )
 
 
+class ConciseMetricPrinter(EventWriter):
+    """Print a compact training summary instead of every auxiliary loss."""
+
+    def __init__(self, max_iter: int, window_size: int = 20) -> None:
+        self.max_iter = max_iter
+        self.window_size = window_size
+        self.logger = logging.getLogger("detectron2")
+
+    def write(self) -> None:
+        storage = get_event_storage()
+        iteration = storage.iter
+        latest = storage.latest_with_smoothing_hint(self.window_size)
+
+        def latest_value(name: str):
+            value = latest.get(name)
+            if value is None:
+                return None
+            return value[0] if isinstance(value, tuple) else value
+
+        pieces = [f"iter: {iteration}/{self.max_iter}"]
+        for name in ("total_loss", "loss_ce", "loss_bbox", "loss_giou", "loss_ce_dn"):
+            value = latest_value(name)
+            if value is not None:
+                pieces.append(f"{name}: {value:.4g}")
+
+        lr = latest_value("lr")
+        if lr is not None:
+            pieces.append(f"lr: {lr:.3g}")
+        if torch.cuda.is_available():
+            pieces.append(f"max_mem: {torch.cuda.max_memory_allocated() / 1024.0 / 1024.0:.0f}M")
+
+        self.logger.info("  ".join(pieces))
+
+
+class TqdmHook(hooks.HookBase):
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = enabled and tqdm is not None and comm.is_main_process()
+        self.progress = None
+
+    def before_train(self) -> None:
+        if not self.enabled:
+            return
+        total = max(0, self.trainer.max_iter - self.trainer.start_iter)
+        self.progress = tqdm(total=total, dynamic_ncols=True, desc="training")
+
+    def after_step(self) -> None:
+        if self.progress is None:
+            return
+        self.progress.update(1)
+        storage = get_event_storage()
+        latest = storage.latest_with_smoothing_hint(20)
+
+        def latest_value(name: str):
+            value = latest.get(name)
+            if value is None:
+                return None
+            return value[0] if isinstance(value, tuple) else value
+
+        postfix = {}
+        total_loss = latest_value("total_loss")
+        lr = latest_value("lr")
+        if total_loss is not None:
+            postfix["loss"] = f"{total_loss:.3g}"
+        if lr is not None:
+            postfix["lr"] = f"{lr:.2g}"
+        if postfix:
+            self.progress.set_postfix(postfix, refresh=False)
+
+    def after_train(self) -> None:
+        if self.progress is not None:
+            self.progress.close()
+            self.progress = None
+
+
 class Trainer(DefaultTrainer):
     """Trainer adapted to MaskDINO without depending on task-specific entry files."""
 
@@ -240,6 +330,25 @@ class Trainer(DefaultTrainer):
         self.cfg = cfg
 
         self.register_hooks(self.build_hooks())
+
+    def build_hooks(self):
+        hooks_list = super().build_hooks()
+        log_period = max(1, int(getattr(self.cfg, "TRAIN_LOG_PERIOD", 100)))
+        for hook in hooks_list:
+            if isinstance(hook, hooks.PeriodicWriter) and hasattr(hook, "_period"):
+                hook._period = log_period
+        if getattr(self.cfg, "TRAIN_TQDM", True):
+            hooks_list.insert(-1, TqdmHook(enabled=True))
+        return hooks_list
+
+    def build_writers(self):
+        if not comm.is_main_process():
+            return []
+        return [
+            ConciseMetricPrinter(self.max_iter),
+            JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
+            TensorboardXWriter(self.cfg.OUTPUT_DIR),
+        ]
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
@@ -574,6 +683,8 @@ def setup(args):
     cfg.DATASETS.TRAIN = (f"{args.task}_train",)
     cfg.DATASETS.TEST = (f"{args.task}_val",)
     cfg.OUTPUT_DIR = str(args.output_dir)
+    cfg.TRAIN_LOG_PERIOD = args.log_period
+    cfg.TRAIN_TQDM = not args.no_tqdm
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
     cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False

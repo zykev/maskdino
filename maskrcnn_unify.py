@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import random
+import warnings
 from collections import defaultdict
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
+import detectron2.engine.hooks as d2_hooks
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import DatasetCatalog, DatasetMapper, MetadataCatalog, build_detection_test_loader
@@ -20,11 +23,23 @@ from detectron2.engine import DefaultPredictor, DefaultTrainer
 from detectron2.engine.hooks import HookBase
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset
 from detectron2.structures import BoxMode
+from detectron2.utils.events import EventWriter, JSONWriter, TensorboardXWriter, get_event_storage
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
 import detectron2.utils.comm as comm
 
 from datasets_coco.datasets_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"`torch\.cuda\.amp\.autocast\(args\.\.\.\)` is deprecated.*",
+    category=FutureWarning,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +68,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat_threshold", default=None, type=float)
     parser.add_argument("--vis_samples", default=8, type=int, help="Maximum visualizations per GT class.")
     parser.add_argument("--vis_score_thresh", default=0.5, type=float)
+    parser.add_argument("--log_period", default=100, type=int, help="Iteration interval for concise console logs.")
+    parser.add_argument("--no_tqdm", action="store_true", help="Disable the training progress bar.")
     parser.add_argument("--seed", default=42, type=int)
     return parser.parse_args()
 
@@ -185,6 +202,7 @@ def register_datasets(args: argparse.Namespace, class_names: list[str]) -> None:
 
 def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg = get_cfg()
+    cfg.set_new_allowed(True)
     cfg.DATALOADER.KEEP_NEGATIVE_RATIO = 0.5
     cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
     if args.config_file:
@@ -229,6 +247,8 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
         cfg.TEST.EVAL_PERIOD = eval_period
     if args.output_dir is not None:
         cfg.OUTPUT_DIR = str(args.output_dir)
+    cfg.TRAIN_LOG_PERIOD = getattr(args, "log_period", 100)
+    cfg.TRAIN_TQDM = not getattr(args, "no_tqdm", False)
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
     if weights:
@@ -276,6 +296,80 @@ class LossEvalHook(HookBase):
             self._do_loss_eval()
 
 
+class ConciseMetricPrinter(EventWriter):
+    """Print a compact training summary while preserving full metrics on disk."""
+
+    def __init__(self, max_iter: int, window_size: int = 20) -> None:
+        self.max_iter = max_iter
+        self.window_size = window_size
+        self.logger = logging.getLogger("detectron2")
+
+    def write(self) -> None:
+        storage = get_event_storage()
+        iteration = storage.iter
+        latest = storage.latest_with_smoothing_hint(self.window_size)
+
+        def latest_value(name: str):
+            value = latest.get(name)
+            if value is None:
+                return None
+            return value[0] if isinstance(value, tuple) else value
+
+        pieces = [f"iter: {iteration}/{self.max_iter}"]
+        for name in ("total_loss", "loss_cls", "loss_box_reg", "loss_mask", "validation_loss"):
+            value = latest_value(name)
+            if value is not None:
+                pieces.append(f"{name}: {value:.4g}")
+
+        lr = latest_value("lr")
+        if lr is not None:
+            pieces.append(f"lr: {lr:.3g}")
+        if torch.cuda.is_available():
+            pieces.append(f"max_mem: {torch.cuda.max_memory_allocated() / 1024.0 / 1024.0:.0f}M")
+
+        self.logger.info("  ".join(pieces))
+
+
+class TqdmHook(HookBase):
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = enabled and tqdm is not None and comm.is_main_process()
+        self.progress = None
+
+    def before_train(self) -> None:
+        if not self.enabled:
+            return
+        total = max(0, self.trainer.max_iter - self.trainer.start_iter)
+        self.progress = tqdm(total=total, dynamic_ncols=True, desc="training")
+
+    def after_step(self) -> None:
+        if self.progress is None:
+            return
+        self.progress.update(1)
+        storage = get_event_storage()
+        latest = storage.latest_with_smoothing_hint(20)
+
+        def latest_value(name: str):
+            value = latest.get(name)
+            if value is None:
+                return None
+            return value[0] if isinstance(value, tuple) else value
+
+        postfix = {}
+        total_loss = latest_value("total_loss")
+        lr = latest_value("lr")
+        if total_loss is not None:
+            postfix["loss"] = f"{total_loss:.3g}"
+        if lr is not None:
+            postfix["lr"] = f"{lr:.2g}"
+        if postfix:
+            self.progress.set_postfix(postfix, refresh=False)
+
+    def after_train(self) -> None:
+        if self.progress is not None:
+            self.progress.close()
+            self.progress = None
+
+
 class Trainer(DefaultTrainer):
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
@@ -284,14 +378,29 @@ class Trainer(DefaultTrainer):
         return COCOEvaluator(dataset_name, output_dir=output_folder)
 
     def build_hooks(self):
-        hooks = super().build_hooks()
+        hooks_list = super().build_hooks()
+        log_period = max(1, int(getattr(self.cfg, "TRAIN_LOG_PERIOD", 100)))
+        for hook in hooks_list:
+            if isinstance(hook, d2_hooks.PeriodicWriter) and hasattr(hook, "_period"):
+                hook._period = log_period
         val_loader = build_detection_test_loader(
             self.cfg,
             self.cfg.DATASETS.TEST[0],
             mapper=DatasetMapper(self.cfg, is_train=True),
         )
-        hooks.insert(-1, LossEvalHook(self.cfg.TEST.EVAL_PERIOD, self.model, val_loader))
-        return hooks
+        hooks_list.insert(-1, LossEvalHook(self.cfg.TEST.EVAL_PERIOD, self.model, val_loader))
+        if getattr(self.cfg, "TRAIN_TQDM", True):
+            hooks_list.insert(-1, TqdmHook(enabled=True))
+        return hooks_list
+
+    def build_writers(self):
+        if not comm.is_main_process():
+            return []
+        return [
+            ConciseMetricPrinter(self.max_iter),
+            JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
+            TensorboardXWriter(self.cfg.OUTPUT_DIR),
+        ]
 
 
 def evaluate(cfg) -> dict:
