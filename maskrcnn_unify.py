@@ -58,14 +58,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def default_paths(args: argparse.Namespace) -> argparse.Namespace:
+    config_file = getattr(args, "config_file", None)
     if args.task == "caries":
-        args.config_file = args.config_file or Path("configs/default_maskrcnn_caries_config.yaml")
+        args.config_file = config_file or Path("configs/default_maskrcnn_caries_config.yaml")
         args.data_dir = args.data_dir or Path(".")
         args.train_json = args.train_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_train.json")
         args.test_json = args.test_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_test.json")
         args.output_dir = args.output_dir or Path("output/maskrcnn_caries")
     else:
-        args.config_file = args.config_file or Path("configs/default_maskrcnn_orth_config.yaml")
+        args.config_file = config_file or Path("configs/default_maskrcnn_orth_config.yaml")
         args.data_dir = args.data_dir or Path(".datasets/intraoral_anno/orth_test/orth_test")
         args.train_json = args.train_json or Path(".datasets/intraoral_anno/orth_test/orth_detection_train.json")
         args.test_json = args.test_json or Path(".datasets/intraoral_anno/orth_test/orth_detection_test.json")
@@ -194,34 +195,45 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
     cfg.MODEL.MASK_ON = args.task == "caries"
 
-    if args.num_workers is not None:
-        cfg.DATALOADER.NUM_WORKERS = args.num_workers
+    num_workers = getattr(args, "num_workers", None)
+    repeat_threshold = getattr(args, "repeat_threshold", None)
+    keep_negative_ratio = getattr(args, "keep_negative_ratio", None)
+    score_thresh = getattr(args, "score_thresh", None)
+    ims_per_batch = getattr(args, "ims_per_batch", None)
+    base_lr = getattr(args, "base_lr", None)
+    max_iter = getattr(args, "max_iter", None)
+    eval_period = getattr(args, "eval_period", None)
+    weights = getattr(args, "weights", "")
+    eval_only = getattr(args, "eval_only", False)
+
+    if num_workers is not None:
+        cfg.DATALOADER.NUM_WORKERS = num_workers
     cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False
-    if args.repeat_threshold is not None:
-        cfg.DATALOADER.REPEAT_THRESHOLD = args.repeat_threshold
-    if args.keep_negative_ratio is not None:
-        cfg.DATALOADER.KEEP_NEGATIVE_RATIO = args.keep_negative_ratio
+    if repeat_threshold is not None:
+        cfg.DATALOADER.REPEAT_THRESHOLD = repeat_threshold
+    if keep_negative_ratio is not None:
+        cfg.DATALOADER.KEEP_NEGATIVE_RATIO = keep_negative_ratio
     else:
         args.keep_negative_ratio = cfg.DATALOADER.KEEP_NEGATIVE_RATIO
-    if args.score_thresh is not None:
-        cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = args.score_thresh
-    if args.ims_per_batch is not None:
-        cfg.SOLVER.IMS_PER_BATCH = args.ims_per_batch
-    if args.base_lr is not None:
-        cfg.SOLVER.BASE_LR = args.base_lr
-    if args.max_iter is not None:
-        cfg.SOLVER.MAX_ITER = args.max_iter
-        cfg.SOLVER.STEPS = (int(args.max_iter * 0.7), int(args.max_iter * 0.9))
-        cfg.SOLVER.WARMUP_ITERS = min(1000, max(1, args.max_iter // 20))
-    if args.eval_period is not None:
-        cfg.TEST.EVAL_PERIOD = args.eval_period
+    if score_thresh is not None:
+        cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_thresh
+    if ims_per_batch is not None:
+        cfg.SOLVER.IMS_PER_BATCH = ims_per_batch
+    if base_lr is not None:
+        cfg.SOLVER.BASE_LR = base_lr
+    if max_iter is not None:
+        cfg.SOLVER.MAX_ITER = max_iter
+        cfg.SOLVER.STEPS = (int(max_iter * 0.7), int(max_iter * 0.9))
+        cfg.SOLVER.WARMUP_ITERS = min(1000, max(1, max_iter // 20))
+    if eval_period is not None:
+        cfg.TEST.EVAL_PERIOD = eval_period
     if args.output_dir is not None:
         cfg.OUTPUT_DIR = str(args.output_dir)
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
-    if args.weights:
-        cfg.MODEL.WEIGHTS = args.weights
-    elif args.eval_only:
+    if weights:
+        cfg.MODEL.WEIGHTS = weights
+    elif eval_only:
         cfg.MODEL.WEIGHTS = str(Path(cfg.OUTPUT_DIR) / "model_final.pth")
     elif not cfg.MODEL.WEIGHTS:
         cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")

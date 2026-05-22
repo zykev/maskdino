@@ -78,15 +78,16 @@ def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 
 def apply_default_paths(args) -> None:
+    config_file = getattr(args, "config_file", None)
     if args.task == "caries":
-        if not args.config_file:
+        if not config_file:
             args.config_file = "configs/default_maskdino_caries_config.yaml"
         args.data_dir = args.data_dir or Path(".datasets/intraoral_anno/single_ch_0225/single_tooth")
         args.train_json = args.train_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_train.json")
         args.test_json = args.test_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_test.json")
         args.output_dir = args.output_dir or Path("output/maskdino_caries")
     else:
-        if not args.config_file:
+        if not config_file:
             args.config_file = "configs/default_maskdino_orth_config.yaml"
         args.data_dir = args.data_dir or Path(".datasets/intraoral_anno/orth_test/orth_test")
         args.train_json = args.train_json or Path(".datasets/intraoral_anno/orth_test/orth_detection_train.json")

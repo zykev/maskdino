@@ -44,7 +44,6 @@ from maskrcnn_pred import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate unified MaskDINO caries/orth checkpoints.")
     parser.add_argument("--task", choices=["caries", "orth"], default="caries")
-    parser.add_argument("--config_file", default=None, type=Path)
     parser.add_argument("--data_dir", default=None, type=Path)
     parser.add_argument("--train_json", default=None, type=Path)
     parser.add_argument("--test_json", default=None, type=Path)
