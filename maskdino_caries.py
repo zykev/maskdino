@@ -24,12 +24,17 @@ import warnings
 # 忽略掉所有的 FutureWarning 警告
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog, DatasetCatalog, build_detection_train_loader
 from detectron2.structures import BoxMode # Added: needed for dataset registration
+from detectron2.modeling import build_model
+from detectron2.utils.visualizer import Visualizer
 
 from detectron2.evaluation import (
     COCOEvaluator,
@@ -319,6 +324,170 @@ class Trainer(DefaultTrainer):
         res = OrderedDict({k + "_TTA": v for k, v in res.items()})
         return res
 
+
+class MaskDINOPredictor:
+    def __init__(self, cfg):
+        self.cfg = cfg.clone()
+        self.model = build_model(self.cfg)
+        self.model.eval()
+        DetectionCheckpointer(self.model).load(self.cfg.MODEL.WEIGHTS)
+        self.input_format = self.cfg.INPUT.FORMAT
+
+    def __call__(self, original_image):
+        with torch.no_grad():
+            if self.input_format == "RGB":
+                original_image = original_image[:, :, ::-1]
+            height, width = original_image.shape[:2]
+            image = torch.as_tensor(original_image.astype("float32").transpose(2, 0, 1))
+            inputs = [{"image": image, "height": height, "width": width}]
+            return self.model(inputs)[0]
+
+
+def save_confidence_score_distribution(cfg, predictor, dataset_dicts, class_names):
+    scores_per_class = {idx: [] for idx in range(len(class_names))}
+    gt_counts_per_class = {idx: 0 for idx in range(len(class_names))}
+
+    print("Saving MaskDINO confidence score distribution...")
+    for record in dataset_dicts:
+        for ann in record.get("annotations", []):
+            cat_id = ann["category_id"]
+            if 0 <= cat_id < len(class_names):
+                gt_counts_per_class[cat_id] += 1
+
+        image = cv2.imread(record["file_name"])
+        if image is None:
+            continue
+        outputs = predictor(image)
+        instances = outputs["instances"].to("cpu")
+        if not instances.has("scores"):
+            continue
+        for cls_id, score in zip(instances.pred_classes.tolist(), instances.scores.tolist()):
+            if 0 <= cls_id < len(class_names):
+                scores_per_class[cls_id].append(score)
+
+    cols = 4
+    rows = int(np.ceil(len(class_names) / cols))
+    plt.figure(figsize=(cols * 5, rows * 4))
+    plt.suptitle("Confidence Score Distribution per Class", fontsize=18)
+
+    for cls_id, class_name in enumerate(class_names):
+        plt.subplot(rows, cols, cls_id + 1)
+        scores = scores_per_class[cls_id]
+        title = f"{class_name}\nGT={gt_counts_per_class[cls_id]} Pred={len(scores)}"
+        if scores:
+            plt.hist(scores, bins=30, color="skyblue", edgecolor="black", alpha=0.75)
+            plt.axvline(np.mean(scores), color="red", linestyle="dashed", linewidth=1, label=f"Mean: {np.mean(scores):.2f}")
+            plt.legend(fontsize=8)
+        else:
+            plt.text(0.5, 0.5, "No Predictions", ha="center", va="center")
+        plt.title(title)
+        plt.xlim(0.0, 1.0)
+        plt.xlabel("Confidence")
+        plt.ylabel("Count")
+
+    output_dir = os.path.join(cfg.OUTPUT_DIR, "inference", "custom_visualizations")
+    os.makedirs(output_dir, exist_ok=True)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(os.path.join(output_dir, "confidence_score_distribution.png"))
+    plt.close()
+
+
+def add_label(image_bgr, text, color):
+    labeled = image_bgr.copy()
+    cv2.rectangle(labeled, (0, 0), (labeled.shape[1], 34), (0, 0, 0), -1)
+    cv2.putText(labeled, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+    return labeled
+
+
+def save_prediction_visualizations(cfg, predictor, dataset_dicts, metadata, class_names, max_samples=5, conf_thresh=0.5):
+    vis_save_dir = os.path.join(cfg.OUTPUT_DIR, "inference", "custom_visualizations")
+    os.makedirs(vis_save_dir, exist_ok=True)
+
+    category_to_samples = {idx: [] for idx in range(len(class_names))}
+    for record in dataset_dicts:
+        seen = set()
+        for ann in record.get("annotations", []):
+            cat_id = ann["category_id"]
+            if 0 <= cat_id < len(class_names) and cat_id not in seen:
+                category_to_samples[cat_id].append(record)
+                seen.add(cat_id)
+
+    for cls_id, class_name in enumerate(class_names):
+        print(f"Category {cls_id} ({class_name}): Found {len(category_to_samples[cls_id])} samples")
+
+    target_size = (640, 640)
+    for cls_id, class_name in enumerate(class_names):
+        samples = category_to_samples[cls_id]
+        if not samples:
+            continue
+
+        class_dir = os.path.join(vis_save_dir, f"{cls_id:02d}_{class_name}")
+        os.makedirs(class_dir, exist_ok=True)
+        selected = random.sample(samples, min(len(samples), max_samples))
+
+        row_orig, row_gt, row_pred = [], [], []
+        for idx, record in enumerate(selected):
+            image_bgr = cv2.imread(record["file_name"])
+            if image_bgr is None:
+                continue
+
+            image_rgb = image_bgr[:, :, ::-1]
+            gt_rgb = Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_dataset_dict(record).get_image()
+
+            outputs = predictor(image_bgr)
+            instances = outputs["instances"].to("cpu")
+            if instances.has("scores"):
+                instances = instances[instances.scores >= conf_thresh]
+            pred_rgb = Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_instance_predictions(instances).get_image()
+
+            gt_bgr = gt_rgb[:, :, ::-1]
+            pred_bgr = pred_rgb[:, :, ::-1]
+
+            cv2.imwrite(os.path.join(class_dir, f"sample_{idx}_0_orig.jpg"), image_bgr)
+            cv2.imwrite(os.path.join(class_dir, f"sample_{idx}_1_gt.jpg"), gt_bgr)
+            cv2.imwrite(os.path.join(class_dir, f"sample_{idx}_2_pred.jpg"), pred_bgr)
+
+            orig_resized = add_label(cv2.resize(image_bgr, target_size), f"Sample {idx}", (255, 255, 255))
+            gt_resized = add_label(cv2.resize(gt_bgr, target_size), "GT", (0, 255, 0))
+            pred_resized = add_label(cv2.resize(pred_bgr, target_size), f"Pred score>={conf_thresh:g}", (0, 0, 255))
+
+            row_orig.append(orig_resized)
+            row_gt.append(gt_resized)
+            row_pred.append(pred_resized)
+
+        if row_orig:
+            summary_matrix = np.vstack([np.hstack(row_orig), np.hstack(row_gt), np.hstack(row_pred)])
+            cv2.imwrite(os.path.join(class_dir, f"00_{class_name}_summary_matrix.jpg"), summary_matrix)
+
+    print(f"Saved MaskDINO visualizations to: {vis_save_dir}")
+
+
+def save_post_train_visualizations(cfg):
+    if not comm.is_main_process():
+        return
+
+    weights_path = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
+    if not os.path.exists(weights_path):
+        print(f"Skip visualization: checkpoint not found: {weights_path}")
+        return
+
+    vis_cfg = cfg.clone()
+    vis_cfg.defrost()
+    vis_cfg.MODEL.WEIGHTS = weights_path
+    vis_cfg.MODEL.MaskDINO.TEST.INSTANCE_ON = True
+    vis_cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON = False
+    vis_cfg.MODEL.MaskDINO.TEST.PANOPTIC_ON = False
+    vis_cfg.freeze()
+
+    dataset_name = cfg.DATASETS.TEST[0]
+    dataset_dicts = DatasetCatalog.get(dataset_name)
+    metadata = MetadataCatalog.get(dataset_name)
+    class_names = metadata.thing_classes
+
+    predictor = MaskDINOPredictor(vis_cfg)
+    save_confidence_score_distribution(vis_cfg, predictor, dataset_dicts, class_names)
+    save_prediction_visualizations(vis_cfg, predictor, dataset_dicts, metadata, class_names)
+
 # ==============================================================================
 #  3. Setup & Main (Modified for Custom Dataset)
 # ==============================================================================
@@ -402,7 +571,10 @@ def main(args):
 
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
-    return trainer.train()
+    train_result = trainer.train()
+    comm.synchronize()
+    save_post_train_visualizations(cfg)
+    return train_result
 
 
 if __name__ == "__main__":

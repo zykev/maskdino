@@ -35,23 +35,24 @@ def parse_args() -> argparse.Namespace:
         default="caries",
         help="caries: single_tooth instance segmentation; orth: orthodontic object detection.",
     )
-    parser.add_argument("--config-file", default=None, type=Path)
-    parser.add_argument("--data-dir", default=None, type=Path)
-    parser.add_argument("--train-json", default=None, type=Path)
-    parser.add_argument("--test-json", default=None, type=Path)
-    parser.add_argument("--output-dir", default=None, type=Path)
+    parser.add_argument("--config_file", default=None, type=Path)
+    parser.add_argument("--data_dir", default=None, type=Path)
+    parser.add_argument("--train_json", default=None, type=Path)
+    parser.add_argument("--test_json", default=None, type=Path)
+    parser.add_argument("--output_dir", default=None, type=Path)
     parser.add_argument("--weights", default="", help="Optional checkpoint for resume/eval.")
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--eval-only", action="store_true")
-    parser.add_argument("--max-iter", default=None, type=int)
-    parser.add_argument("--eval-period", default=None, type=int)
-    parser.add_argument("--ims-per-batch", default=None, type=int)
-    parser.add_argument("--base-lr", default=None, type=float)
-    parser.add_argument("--num-workers", default=None, type=int)
-    parser.add_argument("--score-thresh", default=None, type=float)
-    parser.add_argument("--keep-negative-ratio", default=None, type=float)
-    parser.add_argument("--repeat-threshold", default=None, type=float)
-    parser.add_argument("--vis-samples", default=16, type=int, help="Maximum visualizations per GT class.")
+    parser.add_argument("--eval_only", action="store_true")
+    parser.add_argument("--max_iter", default=None, type=int)
+    parser.add_argument("--eval_period", default=None, type=int)
+    parser.add_argument("--ims_per_batch", default=None, type=int)
+    parser.add_argument("--base_lr", default=None, type=float)
+    parser.add_argument("--num_workers", default=None, type=int)
+    parser.add_argument("--score_thresh", default=None, type=float)
+    parser.add_argument("--keep_negative_ratio", default=None, type=float)
+    parser.add_argument("--repeat_threshold", default=None, type=float)
+    parser.add_argument("--vis_samples", default=8, type=int, help="Maximum visualizations per GT class.")
+    parser.add_argument("--vis_score_thresh", default=0.5, type=float)
     parser.add_argument("--seed", default=42, type=int)
     return parser.parse_args()
 
@@ -98,7 +99,7 @@ def load_coco_dicts(
     seed: int,
 ) -> list[dict]:
     if not 0.0 <= keep_negative_ratio <= 1.0:
-        raise ValueError("--keep-negative-ratio must be between 0.0 and 1.0")
+        raise ValueError("--keep_negative_ratio must be between 0.0 and 1.0")
 
     with json_path.open("r", encoding="utf-8") as f:
         coco_data = json.load(f)
@@ -343,11 +344,14 @@ def draw_pred_panel(image_rgb: np.ndarray, metadata, instances, draw_masks: bool
     return Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_instance_predictions(pred_instances).get_image()
 
 
-def save_visualizations(cfg, limit: int, seed: int) -> None:
+def save_visualizations(cfg, limit: int, seed: int, score_thresh: float) -> None:
     if limit <= 0:
         return
 
     cfg = cfg.clone()
+    cfg.defrost()
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_thresh
+    cfg.freeze()
     predictor = DefaultPredictor(cfg)
     dataset_name = cfg.DATASETS.TEST[0]
     dataset_dicts = DatasetCatalog.get(dataset_name)
@@ -378,7 +382,7 @@ def save_visualizations(cfg, limit: int, seed: int) -> None:
                 gt_vis = draw_gt_panel(image_rgb, metadata, record, draw_masks)
                 pred_vis = draw_pred_panel(image_rgb, metadata, outputs["instances"], draw_masks)
                 gt_panel = add_panel_title(gt_vis, "GT")
-                pred_panel = add_panel_title(pred_vis, f"Pred score>={cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST:g}")
+                pred_panel = add_panel_title(pred_vis, f"Pred score>={score_thresh:g}")
                 separator = np.full((gt_panel.shape[0], 8, 3), 255, dtype=np.uint8)
                 comparison = np.concatenate([gt_panel, separator, pred_panel], axis=1)
                 rendered_by_image_id[image_id] = comparison
@@ -406,7 +410,7 @@ def main() -> None:
 
     if args.eval_only:
         evaluate(cfg)
-        save_visualizations(cfg, args.vis_samples, args.seed)
+        save_visualizations(cfg, args.vis_samples, args.seed, args.vis_score_thresh)
         return
 
     trainer = Trainer(cfg)
@@ -415,7 +419,7 @@ def main() -> None:
 
     cfg.MODEL.WEIGHTS = str(Path(cfg.OUTPUT_DIR) / "model_final.pth")
     evaluate(cfg)
-    save_visualizations(cfg, args.vis_samples, args.seed)
+    save_visualizations(cfg, args.vis_samples, args.seed, args.vis_score_thresh)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from detectron2.structures import Boxes, pairwise_iou
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
 
-from maskrcnn_unified import (
+from maskrcnn_unify import (
     add_panel_title,
     build_cfg,
     default_paths,
@@ -38,24 +38,24 @@ from maskrcnn_unified import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate unified Mask R-CNN caries/orth checkpoints.")
     parser.add_argument("--task", choices=["caries", "orth"], default="caries")
-    parser.add_argument("--config-file", default=None, type=Path)
-    parser.add_argument("--data-dir", default=None, type=Path)
-    parser.add_argument("--train-json", default=None, type=Path)
-    parser.add_argument("--test-json", default=None, type=Path)
+    parser.add_argument("--config_file", default=None, type=Path)
+    parser.add_argument("--data_dir", default=None, type=Path)
+    parser.add_argument("--train_json", default=None, type=Path)
+    parser.add_argument("--test_json", default=None, type=Path)
     parser.add_argument("--weights", default="", help="Checkpoint path. Defaults to output_dir/model_final.pth.")
-    parser.add_argument("--output-dir", default=None, type=Path)
+    parser.add_argument("--output_dir", default=None, type=Path)
     parser.add_argument(
-        "--eval-splits",
+        "--eval_splits",
         nargs="+",
         default=["train", "test"],
         choices=["train", "test"],
         help="Dataset splits to evaluate.",
     )
-    parser.add_argument("--score-thresh", default=0.05, type=float)
-    parser.add_argument("--vis-score-thresh", default=0.5, type=float)
-    parser.add_argument("--vis-samples", default=32, type=int, help="Maximum visualizations per GT class.")
-    parser.add_argument("--keep-negative-ratio", default=None, type=float)
-    parser.add_argument("--repeat-threshold", default=None, type=float)
+    parser.add_argument("--score_thresh", default=0.05, type=float)
+    parser.add_argument("--vis_score_thresh", default=0.5, type=float)
+    parser.add_argument("--vis_samples", default=32, type=int, help="Maximum visualizations per GT class.")
+    parser.add_argument("--keep_negative_ratio", default=None, type=float)
+    parser.add_argument("--repeat_threshold", default=None, type=float)
     parser.add_argument("--seed", default=42, type=int)
     return parser.parse_args()
 

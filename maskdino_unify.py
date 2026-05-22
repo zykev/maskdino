@@ -4,42 +4,75 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import itertools
 import json
+import logging
 import os
 import random
 import types
+import weakref
+from collections import OrderedDict
 from pathlib import Path
+from typing import Any, Dict, List, Set
 
+import cv2
 import detectron2.utils.comm as comm
+import numpy as np
 import torch
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
-from detectron2.data import DatasetCatalog, MetadataCatalog
-from detectron2.engine import default_argument_parser, default_setup, launch
-from detectron2.evaluation import COCOEvaluator, verify_results
-from detectron2.projects.deeplab import add_deeplab_config
+from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_train_loader
+from detectron2.engine import (
+    AMPTrainer,
+    DefaultTrainer,
+    SimpleTrainer,
+    create_ddp_model,
+    default_argument_parser,
+    default_setup,
+    launch,
+)
+from detectron2.evaluation import COCOEvaluator, DatasetEvaluators, SemSegEvaluator, verify_results
+from detectron2.modeling import build_model
+from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
+from detectron2.solver.build import maybe_add_gradient_clipping
 from detectron2.structures import BoxMode
 from detectron2.utils.logger import setup_logger
+from detectron2.utils.visualizer import Visualizer
 
 from datasets_coco.datasets_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
-from maskdino import add_maskdino_config
-from maskdino_train import Trainer
+from maskdino import (
+    COCOInstanceNewBaselineDatasetMapper,
+    COCOPanopticNewBaselineDatasetMapper,
+    DetrDatasetMapper,
+    MaskFormerSemanticDatasetMapper,
+    SemanticSegmentorWithTTA,
+    add_maskdino_config,
+)
 from maskdino.utils import box_ops
 
 
 def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--config_file", dest="config_file", default=argparse.SUPPRESS)
+    parser.add_argument("--num_gpus", dest="num_gpus", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--num_machines", dest="num_machines", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--machine_rank", dest="machine_rank", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--dist_url", dest="dist_url", default=argparse.SUPPRESS)
+    parser.add_argument("--eval_only", dest="eval_only", action="store_true", default=argparse.SUPPRESS)
     parser.add_argument(
         "--task",
         choices=["caries", "orth"],
         default="caries",
         help="caries: single_tooth instance segmentation; orth: orth_test bbox detection.",
     )
-    parser.add_argument("--data-dir", default=None, type=Path)
-    parser.add_argument("--train-json", default=None, type=Path)
-    parser.add_argument("--test-json", default=None, type=Path)
-    parser.add_argument("--output-dir", default=None, type=Path)
-    parser.add_argument("--keep-negative-ratio", default=None, type=float)
-    parser.add_argument("--repeat-threshold", default=None, type=float)
+    parser.add_argument("--data_dir", default=None, type=Path)
+    parser.add_argument("--train_json", default=None, type=Path)
+    parser.add_argument("--test_json", default=None, type=Path)
+    parser.add_argument("--output_dir", default=None, type=Path)
+    parser.add_argument("--keep_negative_ratio", default=None, type=float)
+    parser.add_argument("--repeat_threshold", default=None, type=float)
+    parser.add_argument("--vis_samples", default=8, type=int, help="Maximum visualizations per GT class.")
+    parser.add_argument("--vis_score_thresh", default=0.5, type=float)
     parser.add_argument("--seed", default=42, type=int)
     return parser
 
@@ -48,7 +81,7 @@ def apply_default_paths(args) -> None:
     if args.task == "caries":
         if not args.config_file:
             args.config_file = "configs/default_maskdino_caries_config.yaml"
-        args.data_dir = args.data_dir or Path(".")
+        args.data_dir = args.data_dir or Path(".datasets/intraoral_anno/single_ch_0225/single_tooth")
         args.train_json = args.train_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_train.json")
         args.test_json = args.test_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_test.json")
         args.output_dir = args.output_dir or Path("output/maskdino_caries")
@@ -86,7 +119,7 @@ def load_coco_dicts(
     seed: int,
 ) -> list[dict]:
     if not 0.0 <= keep_negative_ratio <= 1.0:
-        raise ValueError("--keep-negative-ratio must be between 0.0 and 1.0")
+        raise ValueError("--keep_negative_ratio must be between 0.0 and 1.0")
 
     with json_path.open("r", encoding="utf-8") as f:
         coco_data = json.load(f)
@@ -168,6 +201,164 @@ def register_task_datasets(args, class_names: list[str]) -> None:
         )
 
 
+class Trainer(DefaultTrainer):
+    """Trainer adapted to MaskDINO without depending on task-specific entry files."""
+
+    def __init__(self, cfg):
+        super(DefaultTrainer, self).__init__()
+        logger = logging.getLogger("detectron2")
+        if not logger.isEnabledFor(logging.INFO):
+            setup_logger()
+        cfg = DefaultTrainer.auto_scale_workers(cfg, comm.get_world_size())
+
+        model = self.build_model(cfg)
+        optimizer = self.build_optimizer(cfg, model)
+        data_loader = self.build_train_loader(cfg)
+
+        model = create_ddp_model(model, broadcast_buffers=False)
+        self._trainer = (AMPTrainer if cfg.SOLVER.AMP.ENABLED else SimpleTrainer)(
+            model, data_loader, optimizer
+        )
+
+        self.scheduler = self.build_lr_scheduler(cfg, optimizer)
+
+        kwargs = {
+            "trainer": weakref.proxy(self),
+        }
+        self.checkpointer = DetectionCheckpointer(
+            model,
+            cfg.OUTPUT_DIR,
+            **kwargs,
+        )
+        self.start_iter = 0
+        self.max_iter = cfg.SOLVER.MAX_ITER
+        self.cfg = cfg
+
+        self.register_hooks(self.build_hooks())
+
+    @classmethod
+    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
+        if output_folder is None:
+            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
+        evaluator_list = []
+        evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
+
+        if evaluator_type == "coco" or evaluator_type == "":
+            evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
+
+        if evaluator_type in ["sem_seg", "ade20k_panoptic_seg"]:
+            evaluator_list.append(SemSegEvaluator(dataset_name, distributed=True, output_dir=output_folder))
+
+        if len(evaluator_list) == 0:
+            return COCOEvaluator(dataset_name, output_dir=output_folder)
+        if len(evaluator_list) == 1:
+            return evaluator_list[0]
+        return DatasetEvaluators(evaluator_list)
+
+    @classmethod
+    def build_train_loader(cls, cfg):
+        if cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_lsj":
+            mapper = COCOInstanceNewBaselineDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        if cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_detr":
+            mapper = DetrDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        if cfg.INPUT.DATASET_MAPPER_NAME == "coco_panoptic_lsj":
+            mapper = COCOPanopticNewBaselineDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        if cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic":
+            mapper = MaskFormerSemanticDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        return build_detection_train_loader(cfg, mapper=None)
+
+    @classmethod
+    def build_optimizer(cls, cfg, model):
+        weight_decay_norm = cfg.SOLVER.WEIGHT_DECAY_NORM
+        weight_decay_embed = cfg.SOLVER.WEIGHT_DECAY_EMBED
+
+        defaults = {
+            "lr": cfg.SOLVER.BASE_LR,
+            "weight_decay": cfg.SOLVER.WEIGHT_DECAY,
+        }
+
+        norm_module_types = (
+            torch.nn.BatchNorm1d,
+            torch.nn.BatchNorm2d,
+            torch.nn.BatchNorm3d,
+            torch.nn.SyncBatchNorm,
+            torch.nn.GroupNorm,
+            torch.nn.InstanceNorm1d,
+            torch.nn.InstanceNorm2d,
+            torch.nn.InstanceNorm3d,
+            torch.nn.LayerNorm,
+            torch.nn.LocalResponseNorm,
+        )
+
+        params: List[Dict[str, Any]] = []
+        memo: Set[torch.nn.parameter.Parameter] = set()
+        for module_name, module in model.named_modules():
+            for module_param_name, value in module.named_parameters(recurse=False):
+                if not value.requires_grad or value in memo:
+                    continue
+                memo.add(value)
+
+                hyperparams = copy.copy(defaults)
+                if "backbone" in module_name:
+                    hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.BACKBONE_MULTIPLIER
+                if "relative_position_bias_table" in module_param_name or "absolute_pos_embed" in module_param_name:
+                    hyperparams["weight_decay"] = 0.0
+                if isinstance(module, norm_module_types):
+                    hyperparams["weight_decay"] = weight_decay_norm
+                if isinstance(module, torch.nn.Embedding):
+                    hyperparams["weight_decay"] = weight_decay_embed
+                params.append({"params": [value], **hyperparams})
+
+        def maybe_add_full_model_gradient_clipping(optim):
+            clip_norm_val = cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE
+            enable = (
+                cfg.SOLVER.CLIP_GRADIENTS.ENABLED
+                and cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model"
+                and clip_norm_val > 0.0
+            )
+
+            class FullModelGradientClippingOptimizer(optim):
+                def step(self, closure=None):
+                    all_params = itertools.chain(*[x["params"] for x in self.param_groups])
+                    torch.nn.utils.clip_grad_norm_(all_params, clip_norm_val)
+                    super().step(closure=closure)
+
+            return FullModelGradientClippingOptimizer if enable else optim
+
+        optimizer_type = cfg.SOLVER.OPTIMIZER
+        if optimizer_type == "SGD":
+            optimizer = maybe_add_full_model_gradient_clipping(torch.optim.SGD)(
+                params, cfg.SOLVER.BASE_LR, momentum=cfg.SOLVER.MOMENTUM
+            )
+        elif optimizer_type == "ADAMW":
+            optimizer = maybe_add_full_model_gradient_clipping(torch.optim.AdamW)(
+                params, cfg.SOLVER.BASE_LR
+            )
+        else:
+            raise NotImplementedError(f"no optimizer type {optimizer_type}")
+        if not cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model":
+            optimizer = maybe_add_gradient_clipping(cfg, optimizer)
+        return optimizer
+
+    @classmethod
+    def test_with_TTA(cls, cfg, model):
+        logger = logging.getLogger("detectron2.trainer")
+        logger.info("Running inference with test-time augmentation ...")
+        model = SemanticSegmentorWithTTA(cfg, model)
+        evaluators = [
+            cls.build_evaluator(
+                cfg, name, output_folder=os.path.join(cfg.OUTPUT_DIR, "inference_TTA")
+            )
+            for name in cfg.DATASETS.TEST
+        ]
+        res = cls.test(cfg, model, evaluators)
+        return OrderedDict({k + "_TTA": v for k, v in res.items()})
+
+
 class UnifiedTrainer(Trainer):
     @classmethod
     def build_model(cls, cfg):
@@ -225,6 +416,143 @@ def configure_bbox_only_maskdino(model) -> None:
     criterion.matcher.forward = types.MethodType(matcher_bbox_only_forward, criterion.matcher)
 
 
+class MaskDINOPredictor:
+    def __init__(self, cfg):
+        self.cfg = cfg.clone()
+        self.model = build_model(self.cfg)
+        if getattr(self.cfg, "ORTH_BBOX_ONLY", False):
+            configure_bbox_only_maskdino(self.model)
+        self.model.eval()
+        DetectionCheckpointer(self.model).load(self.cfg.MODEL.WEIGHTS)
+        self.input_format = self.cfg.INPUT.FORMAT
+
+    def __call__(self, original_image):
+        with torch.no_grad():
+            if self.input_format == "RGB":
+                original_image = original_image[:, :, ::-1]
+            height, width = original_image.shape[:2]
+            image = torch.as_tensor(original_image.astype("float32").transpose(2, 0, 1))
+            inputs = [{"image": image, "height": height, "width": width}]
+            return self.model(inputs)[0]
+
+
+def select_samples_per_class(dataset_dicts: list[dict], class_names: list[str], limit: int, seed: int):
+    rng = random.Random(seed)
+    records_by_class: dict[int, list[dict]] = {}
+    for record in dataset_dicts:
+        for cls_id in {ann["category_id"] for ann in record.get("annotations", [])}:
+            if 0 <= cls_id < len(class_names):
+                records_by_class.setdefault(cls_id, []).append(record)
+
+    samples_by_class = {}
+    for cls_id, class_name in enumerate(class_names):
+        records = records_by_class.get(cls_id, [])
+        rng.shuffle(records)
+        samples_by_class[cls_id] = records[: min(limit, len(records))]
+        print(f"Visualization class {cls_id} ({class_name}): {len(samples_by_class[cls_id])}/{len(records)}")
+    return samples_by_class
+
+
+def safe_path_name(name: str) -> str:
+    safe_name = "".join(char if char.isalnum() or char in "._-" else "_" for char in name)
+    return safe_name.strip("._") or "class"
+
+
+def add_panel_title(image_rgb: np.ndarray, title: str) -> np.ndarray:
+    header_height = 36
+    titled = np.full((image_rgb.shape[0] + header_height, image_rgb.shape[1], 3), 255, dtype=np.uint8)
+    titled[header_height:, :, :] = image_rgb
+    cv2.putText(titled, title, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)
+    return titled
+
+
+def strip_instance_masks(record: dict) -> dict:
+    stripped_record = {key: value for key, value in record.items() if key != "annotations"}
+    stripped_record["annotations"] = [
+        {key: value for key, value in ann.items() if key != "segmentation"}
+        for ann in record.get("annotations", [])
+    ]
+    return stripped_record
+
+
+def draw_gt_panel(image_rgb: np.ndarray, metadata, record: dict, draw_masks: bool) -> np.ndarray:
+    draw_record = record if draw_masks else strip_instance_masks(record)
+    return Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_dataset_dict(draw_record).get_image()
+
+
+def draw_pred_panel(image_rgb: np.ndarray, metadata, instances, draw_masks: bool) -> np.ndarray:
+    pred_instances = instances.to("cpu")
+    if not draw_masks and pred_instances.has("pred_masks"):
+        pred_instances.remove("pred_masks")
+    return Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_instance_predictions(pred_instances).get_image()
+
+
+def save_visualizations(cfg, limit: int, seed: int, score_thresh: float) -> None:
+    if limit <= 0 or not comm.is_main_process():
+        return
+
+    cfg = cfg.clone()
+    cfg.defrost()
+    if hasattr(cfg.MODEL, "MaskDINO"):
+        cfg.MODEL.MaskDINO.TEST.INSTANCE_ON = True
+        cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON = False
+        cfg.MODEL.MaskDINO.TEST.PANOPTIC_ON = False
+        cfg.MODEL.MaskDINO.TEST.OBJECT_MASK_THRESHOLD = score_thresh
+        if getattr(cfg, "ORTH_BBOX_ONLY", False):
+            cfg.MODEL.MaskDINO.TEST.TEST_FOUCUS_ON_BOX = True
+    cfg.freeze()
+
+    predictor = MaskDINOPredictor(cfg)
+    dataset_name = cfg.DATASETS.TEST[0]
+    dataset_dicts = DatasetCatalog.get(dataset_name)
+    metadata = MetadataCatalog.get(dataset_name)
+    class_names = list(metadata.thing_classes)
+    draw_masks = not getattr(cfg, "ORTH_BBOX_ONLY", False)
+    samples_by_class = select_samples_per_class(dataset_dicts, class_names, limit, seed)
+
+    output_dir = Path(cfg.OUTPUT_DIR) / "visualizations" / "by_class"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rendered_by_image_id: dict[int, np.ndarray] = {}
+
+    for cls_id, samples in samples_by_class.items():
+        class_dir = output_dir / f"{cls_id:02d}_{safe_path_name(class_names[cls_id])}"
+        class_dir.mkdir(parents=True, exist_ok=True)
+        for index, record in enumerate(samples):
+            image_id = record["image_id"]
+            comparison = rendered_by_image_id.get(image_id)
+            if comparison is None:
+                image = cv2.imread(record["file_name"])
+                if image is None:
+                    print(f"Could not read image: {record['file_name']}")
+                    continue
+                outputs = predictor(image)
+                instances = outputs["instances"].to("cpu")
+                if instances.has("scores"):
+                    instances = instances[instances.scores >= score_thresh]
+
+                image_rgb = image[:, :, ::-1]
+                gt_vis = draw_gt_panel(image_rgb, metadata, record, draw_masks)
+                pred_vis = draw_pred_panel(image_rgb, metadata, instances, draw_masks)
+                gt_panel = add_panel_title(gt_vis, "GT")
+                pred_panel = add_panel_title(pred_vis, f"Pred score>={score_thresh:g}")
+                separator = np.full((gt_panel.shape[0], 8, 3), 255, dtype=np.uint8)
+                comparison = np.concatenate([gt_panel, separator, pred_panel], axis=1)
+                rendered_by_image_id[image_id] = comparison
+
+            gt_class_ids = sorted(
+                {
+                    ann["category_id"]
+                    for ann in record.get("annotations", [])
+                    if 0 <= ann["category_id"] < len(class_names)
+                }
+            )
+            class_suffix = "_".join(class_names[gt_cls_id] for gt_cls_id in gt_class_ids) or "negative"
+            filename = f"gt_pred_{index:03d}_image_{image_id}_{safe_path_name(class_suffix)}.jpg"
+            cv2.imwrite(str(class_dir / filename), comparison[:, :, ::-1])
+
+    print(f"Saved visualizations to {output_dir}")
+
+
 def setup(args):
     apply_default_paths(args)
     class_names = load_categories(args.train_json, args.task)
@@ -280,11 +608,21 @@ def main(args):
         res = UnifiedTrainer.test(cfg, model)
         if comm.is_main_process():
             verify_results(cfg, res)
+            save_visualizations(cfg, args.vis_samples, args.seed, args.vis_score_thresh)
         return res
 
     trainer = UnifiedTrainer(cfg)
     trainer.resume_or_load(resume=args.resume)
-    return trainer.train()
+    train_result = trainer.train()
+    comm.synchronize()
+
+    if comm.is_main_process():
+        vis_cfg = cfg.clone()
+        vis_cfg.defrost()
+        vis_cfg.MODEL.WEIGHTS = str(Path(vis_cfg.OUTPUT_DIR) / "model_final.pth")
+        vis_cfg.freeze()
+        save_visualizations(vis_cfg, args.vis_samples, args.seed, args.vis_score_thresh)
+    return train_result
 
 
 if __name__ == "__main__":

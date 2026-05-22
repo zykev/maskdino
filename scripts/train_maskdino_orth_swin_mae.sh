@@ -41,8 +41,8 @@ fi
 
 python maskdino_unify.py \
   --task orth \
-  --config-file "${CONFIG_FILE}" \
-  --num-gpus "${NUM_GPUS}" \
-  --output-dir "${OUTPUT_DIR}" \
+  --config_file "${CONFIG_FILE}" \
+  --num_gpus "${NUM_GPUS}" \
+  --output_dir "${OUTPUT_DIR}" \
   "${EXTRA_OPTS[@]}" \
   "$@"

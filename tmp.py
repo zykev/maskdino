@@ -11,7 +11,7 @@ from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.model_zoo import model_zoo
 from detectron2.structures import BoxMode
 
-from maskrcnn import get_caries_dicts
+from maskrcnn_caries import get_caries_dicts
 
 
 
