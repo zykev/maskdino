@@ -14,7 +14,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from detectron2.data import MetadataCatalog, build_detection_test_loader
+from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_test_loader
 from detectron2.engine import DefaultPredictor
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset
 from detectron2.structures import Boxes, pairwise_iou
