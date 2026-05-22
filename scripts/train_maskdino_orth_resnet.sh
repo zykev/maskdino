@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0,1 \
+CUDA_VISIBLE_DEVICES=1,2 \
 python maskdino_unify.py \
   --task orth \
   --config_file configs/default_maskdino_orth_resnet_config.yaml \
