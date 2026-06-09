@@ -21,6 +21,9 @@ import cv2
 import detectron2.utils.comm as comm
 import numpy as np
 import torch
+# PyTorch >=2.6 defaults torch.load to weights_only=True, which rejects the
+# argparse.Namespace stored in our trusted Swin-MAE pretrain checkpoints.
+torch.serialization.add_safe_globals([argparse.Namespace])
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
 from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_train_loader
