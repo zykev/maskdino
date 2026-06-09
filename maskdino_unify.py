@@ -32,6 +32,7 @@ from detectron2.data import (
     build_detection_test_loader,
     build_detection_train_loader,
 )
+from detectron2.data import transforms as T
 from detectron2.engine import (
     AMPTrainer,
     DefaultTrainer,
@@ -626,13 +627,19 @@ class MaskDINOPredictor:
         self.model.eval()
         DetectionCheckpointer(self.model).load(self.cfg.MODEL.WEIGHTS)
         self.input_format = self.cfg.INPUT.FORMAT
+        # Match the eval-set loader transform (default DatasetMapper, is_train=False):
+        # ResizeShortestEdge(MIN_SIZE_TEST, MAX_SIZE_TEST) so inputs match training-time eval.
+        self.aug = T.ResizeShortestEdge(
+            [self.cfg.INPUT.MIN_SIZE_TEST, self.cfg.INPUT.MIN_SIZE_TEST], self.cfg.INPUT.MAX_SIZE_TEST
+        )
 
     def __call__(self, original_image):
         with torch.no_grad():
             if self.input_format == "RGB":
                 original_image = original_image[:, :, ::-1]
             height, width = original_image.shape[:2]
-            image = torch.as_tensor(original_image.astype("float32").transpose(2, 0, 1))
+            image = self.aug.get_transform(original_image).apply_image(original_image)
+            image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
             inputs = [{"image": image, "height": height, "width": width}]
             return self.model(inputs)[0]
 

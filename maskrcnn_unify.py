@@ -264,33 +264,31 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
 
 
 class LossEvalHook(HookBase):
+    """Periodically compute the validation loss to monitor overfitting."""
+
     def __init__(self, eval_period: int, model, data_loader):
         self._period = eval_period
         self._model = model
         self._data_loader = data_loader
 
-    def _get_loss(self, data):
-        metrics_dict = self._model(data)
-        metrics_dict = {
-            key: value.detach().cpu().item() if isinstance(value, torch.Tensor) else float(value)
-            for key, value in metrics_dict.items()
-        }
-        return sum(metrics_dict.values()), metrics_dict
-
     def _do_loss_eval(self):
-        losses = []
-        loss_by_name: dict[str, list[float]] = defaultdict(list)
+        total: dict[str, float] = {}
+        count = 0
         self._model.train()
         with torch.no_grad():
             for inputs in self._data_loader:
-                total_loss, metrics_dict = self._get_loss(inputs)
-                losses.append(total_loss)
-                for name, value in metrics_dict.items():
-                    loss_by_name[name].append(value)
-        self.trainer.storage.put_scalar("validation_loss", float(np.mean(losses)) if losses else 0.0)
-        for name, values in loss_by_name.items():
-            self.trainer.storage.put_scalar(f"val_{name}", float(np.mean(values)))
-        comm.synchronize()
+                loss_dict = self._model(inputs)
+                for key, value in loss_dict.items():
+                    total[key] = total.get(key, 0.0) + value.item()
+                count += 1
+        # Aggregate per-worker sums with a single collective to avoid deadlocks on uneven shards.
+        all_total = comm.all_gather(total)
+        count_sum = sum(comm.all_gather(count))
+        if count_sum and comm.is_main_process():
+            keys = set().union(*[part.keys() for part in all_total])
+            means = {f"val/{key}": sum(part.get(key, 0.0) for part in all_total) / count_sum for key in keys}
+            means["val/total_loss"] = sum(means.values())
+            self.trainer.storage.put_scalars(**means, smoothing_hint=False)
 
     def after_step(self):
         next_iter = self.trainer.iter + 1
@@ -351,7 +349,7 @@ class ConciseMetricPrinter(EventWriter):
             return value[0] if isinstance(value, tuple) else value
 
         pieces = [f"iter: {iteration}/{self.max_iter}"]
-        for name in ("total_loss", "loss_cls", "loss_box_reg", "loss_mask", "validation_loss"):
+        for name in ("total_loss", "loss_cls", "loss_box_reg", "loss_mask", "val/total_loss"):
             value = latest_value(name)
             if value is not None:
                 pieces.append(f"{name}: {value:.4g}")
@@ -423,7 +421,9 @@ class Trainer(DefaultTrainer):
             self.cfg.DATASETS.TEST[0],
             mapper=DatasetMapper(self.cfg, is_train=True),
         )
-        hooks_list.insert(-1, LossEvalHook(self.cfg.TEST.EVAL_PERIOD, self.model, val_loader))
+        # Insert right after the AP EvalHook so collective ordering is identical on every rank.
+        eval_idx = next(i for i, hook in enumerate(hooks_list) if isinstance(hook, d2_hooks.EvalHook))
+        hooks_list.insert(eval_idx + 1, LossEvalHook(self.cfg.TEST.EVAL_PERIOD, self.model, val_loader))
         if getattr(self.cfg, "TRAIN_TQDM", True):
             hooks_list.insert(-1, TqdmHook(enabled=True))
         return hooks_list
