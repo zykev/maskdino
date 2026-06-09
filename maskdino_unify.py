@@ -26,7 +26,12 @@ import torch
 torch.serialization.add_safe_globals([argparse.Namespace])
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
-from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_train_loader
+from detectron2.data import (
+    DatasetCatalog,
+    MetadataCatalog,
+    build_detection_test_loader,
+    build_detection_train_loader,
+)
 from detectron2.engine import (
     AMPTrainer,
     DefaultTrainer,
@@ -86,6 +91,7 @@ def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--train_json", default=None, type=Path)
     parser.add_argument("--test_json", default=None, type=Path)
     parser.add_argument("--output_dir", default=None, type=Path)
+    parser.add_argument("--wandb_name", default=None, help="Override WANDB.NAME from the config.")
     parser.add_argument("--keep_negative_ratio", default=None, type=float)
     parser.add_argument("--repeat_threshold", default=None, type=float)
     parser.add_argument("--vis_samples", default=8, type=int, help="Maximum visualizations per GT class.")
@@ -255,6 +261,70 @@ class ConciseMetricPrinter(EventWriter):
         self.logger.info("  ".join(pieces))
 
 
+class WandbWriter(EventWriter):
+    """Mirror EventStorage scalars (losses, AP, lr, ...) to Weights & Biases."""
+
+    def __init__(self, cfg, window_size: int = 20) -> None:
+        import wandb
+
+        self._wandb = wandb
+        self._window_size = window_size
+        self._last_write = -1
+        wandb.init(
+            project=cfg.WANDB.PROJECT,
+            entity=cfg.WANDB.ENTITY or None,
+            name=cfg.WANDB.NAME or None,
+            dir=cfg.OUTPUT_DIR,
+        )
+
+    def write(self) -> None:
+        storage = get_event_storage()
+        log_dict = {}
+        new_last_write = self._last_write
+        for key, (value, iteration) in storage.latest_with_smoothing_hint(self._window_size).items():
+            if iteration > self._last_write:
+                log_dict[key] = value
+                new_last_write = max(new_last_write, iteration)
+        if log_dict:
+            self._wandb.log(log_dict, step=new_last_write)
+        self._last_write = new_last_write
+
+    def close(self) -> None:
+        self._wandb.finish()
+
+
+class LossEvalHook(hooks.HookBase):
+    """Periodically compute the validation loss to monitor overfitting."""
+
+    def __init__(self, eval_period: int, model, data_loader) -> None:
+        self._period = eval_period
+        self._model = model
+        self._data_loader = data_loader
+
+    def _do_loss_eval(self) -> None:
+        total: Dict[str, float] = {}
+        count = 0
+        for inputs in self._data_loader:
+            with torch.no_grad():
+                loss_dict = self._model(inputs)
+            for key, value in loss_dict.items():
+                total[key] = total.get(key, 0.0) + value.item()
+            count += 1
+        # Aggregate per-worker sums with a single collective to avoid deadlocks on uneven shards.
+        all_total = comm.all_gather(total)
+        count_sum = sum(comm.all_gather(count))
+        if count_sum and comm.is_main_process():
+            keys = set().union(*[part.keys() for part in all_total])
+            means = {f"val/{key}": sum(part.get(key, 0.0) for part in all_total) / count_sum for key in keys}
+            means["val/total_loss"] = sum(means.values())
+            self.trainer.storage.put_scalars(**means, smoothing_hint=False)
+
+    def after_step(self) -> None:
+        next_iter = self.trainer.iter + 1
+        if self._period > 0 and next_iter % self._period == 0 and next_iter != self.trainer.max_iter:
+            self._do_loss_eval()
+
+
 class TqdmHook(hooks.HookBase):
     def __init__(self, enabled: bool = True) -> None:
         self.enabled = enabled and tqdm is not None and comm.is_main_process()
@@ -340,6 +410,10 @@ class Trainer(DefaultTrainer):
         for hook in hooks_list:
             if isinstance(hook, hooks.PeriodicWriter) and hasattr(hook, "_period"):
                 hook._period = log_period
+        if self.cfg.TEST.EVAL_PERIOD > 0:
+            # Insert right after the AP EvalHook so collective ordering is identical on every rank.
+            eval_idx = next(i for i, hook in enumerate(hooks_list) if isinstance(hook, hooks.EvalHook))
+            hooks_list.insert(eval_idx + 1, LossEvalHook(self.cfg.TEST.EVAL_PERIOD, self.model, self.build_loss_loader(self.cfg)))
         if getattr(self.cfg, "TRAIN_TQDM", True):
             hooks_list.insert(-1, TqdmHook(enabled=True))
         return hooks_list
@@ -347,11 +421,15 @@ class Trainer(DefaultTrainer):
     def build_writers(self):
         if not comm.is_main_process():
             return []
-        return [
+        writers = [
             ConciseMetricPrinter(self.max_iter),
             JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
-            TensorboardXWriter(self.cfg.OUTPUT_DIR),
         ]
+        if getattr(self.cfg, "LOGGER", "tensorboard") == "wandb":
+            writers.append(WandbWriter(self.cfg))
+        else:
+            writers.append(TensorboardXWriter(self.cfg.OUTPUT_DIR))
+        return writers
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
@@ -372,21 +450,27 @@ class Trainer(DefaultTrainer):
             return evaluator_list[0]
         return DatasetEvaluators(evaluator_list)
 
+    @staticmethod
+    def build_mapper(cfg, is_train):
+        name = cfg.INPUT.DATASET_MAPPER_NAME
+        if name == "coco_instance_lsj":
+            return COCOInstanceNewBaselineDatasetMapper(cfg, is_train)
+        if name == "coco_instance_detr":
+            return DetrDatasetMapper(cfg, is_train)
+        if name == "coco_panoptic_lsj":
+            return COCOPanopticNewBaselineDatasetMapper(cfg, is_train)
+        if name == "mask_former_semantic":
+            return MaskFormerSemanticDatasetMapper(cfg, is_train)
+        return None
+
     @classmethod
     def build_train_loader(cls, cfg):
-        if cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_lsj":
-            mapper = COCOInstanceNewBaselineDatasetMapper(cfg, True)
-            return build_detection_train_loader(cfg, mapper=mapper)
-        if cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_detr":
-            mapper = DetrDatasetMapper(cfg, True)
-            return build_detection_train_loader(cfg, mapper=mapper)
-        if cfg.INPUT.DATASET_MAPPER_NAME == "coco_panoptic_lsj":
-            mapper = COCOPanopticNewBaselineDatasetMapper(cfg, True)
-            return build_detection_train_loader(cfg, mapper=mapper)
-        if cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic":
-            mapper = MaskFormerSemanticDatasetMapper(cfg, True)
-            return build_detection_train_loader(cfg, mapper=mapper)
-        return build_detection_train_loader(cfg, mapper=None)
+        return build_detection_train_loader(cfg, mapper=cls.build_mapper(cfg, True))
+
+    @classmethod
+    def build_loss_loader(cls, cfg):
+        # Keep is_train=True so the mapper yields annotations needed to compute losses.
+        return build_detection_test_loader(cfg, cfg.DATASETS.TEST[0], mapper=cls.build_mapper(cfg, True))
 
     @classmethod
     def build_optimizer(cls, cfg, model):
@@ -686,6 +770,8 @@ def setup(args):
     cfg.DATASETS.TRAIN = (f"{args.task}_train",)
     cfg.DATASETS.TEST = (f"{args.task}_val",)
     cfg.OUTPUT_DIR = str(args.output_dir)
+    if args.wandb_name is not None:
+        cfg.WANDB.NAME = args.wandb_name
     cfg.TRAIN_LOG_PERIOD = args.log_period
     cfg.TRAIN_TQDM = not args.no_tqdm
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)

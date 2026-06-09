@@ -78,6 +78,13 @@ SOLVER:
   STEPS: []
 
 TEST:
-  EVAL_PERIOD: 500
+  EVAL_PERIOD: 1000
+
+# Training logger: "tensorboard" or "wandb".
+LOGGER: wandb
+WANDB:
+  PROJECT: maskdino
+  ENTITY: "intraoral"
+  NAME: "maskdino_caries"
 
 OUTPUT_DIR: output/maskdino_caries

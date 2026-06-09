@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_json", default=None, type=Path)
     parser.add_argument("--test_json", default=None, type=Path)
     parser.add_argument("--output_dir", default=None, type=Path)
+    parser.add_argument("--wandb_name", default=None, help="Override WANDB.NAME from the config.")
     parser.add_argument("--weights", default="", help="Optional checkpoint for resume/eval.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
@@ -247,6 +248,8 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
         cfg.TEST.EVAL_PERIOD = eval_period
     if args.output_dir is not None:
         cfg.OUTPUT_DIR = str(args.output_dir)
+    if getattr(args, "wandb_name", None) is not None:
+        cfg.WANDB.NAME = args.wandb_name
     cfg.TRAIN_LOG_PERIOD = getattr(args, "log_period", 100)
     cfg.TRAIN_TQDM = not getattr(args, "no_tqdm", False)
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
@@ -294,6 +297,38 @@ class LossEvalHook(HookBase):
         is_final = next_iter == self.trainer.max_iter
         if is_final or (self._period > 0 and next_iter % self._period == 0):
             self._do_loss_eval()
+
+
+class WandbWriter(EventWriter):
+    """Mirror EventStorage scalars (losses, AP, lr, ...) to Weights & Biases."""
+
+    def __init__(self, cfg, window_size: int = 20) -> None:
+        import wandb
+
+        self._wandb = wandb
+        self._window_size = window_size
+        self._last_write = -1
+        wandb.init(
+            project=cfg.WANDB.PROJECT,
+            entity=cfg.WANDB.ENTITY or None,
+            name=cfg.WANDB.NAME or None,
+            dir=cfg.OUTPUT_DIR,
+        )
+
+    def write(self) -> None:
+        storage = get_event_storage()
+        log_dict = {}
+        new_last_write = self._last_write
+        for key, (value, iteration) in storage.latest_with_smoothing_hint(self._window_size).items():
+            if iteration > self._last_write:
+                log_dict[key] = value
+                new_last_write = max(new_last_write, iteration)
+        if log_dict:
+            self._wandb.log(log_dict, step=new_last_write)
+        self._last_write = new_last_write
+
+    def close(self) -> None:
+        self._wandb.finish()
 
 
 class ConciseMetricPrinter(EventWriter):
@@ -396,11 +431,15 @@ class Trainer(DefaultTrainer):
     def build_writers(self):
         if not comm.is_main_process():
             return []
-        return [
+        writers = [
             ConciseMetricPrinter(self.max_iter),
             JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
-            TensorboardXWriter(self.cfg.OUTPUT_DIR),
         ]
+        if getattr(self.cfg, "LOGGER", "tensorboard") == "wandb":
+            writers.append(WandbWriter(self.cfg))
+        else:
+            writers.append(TensorboardXWriter(self.cfg.OUTPUT_DIR))
+        return writers
 
 
 def evaluate(cfg) -> dict:

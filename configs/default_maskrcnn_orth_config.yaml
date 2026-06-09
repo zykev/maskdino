@@ -43,4 +43,11 @@ SOLVER:
 TEST:
   EVAL_PERIOD: 200
 
+# Training logger: "tensorboard" or "wandb".
+LOGGER: wandb
+WANDB:
+  PROJECT: maskdino
+  ENTITY: "intraoral"
+  NAME: "maskrcnn_orth"
+
 OUTPUT_DIR: output/maskrcnn_orth
