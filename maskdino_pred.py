@@ -135,12 +135,12 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
 
 def run_coco_eval(
     cfg,
+    predictor,
     dataset_name: str,
     output_dir: Path,
     task: str,
     save_raw_predictions: bool,
 ) -> dict:
-    predictor = MaskDINOPredictor(cfg)
     tasks = ("bbox",) if task == "orth" else None
     evaluator_output_dir = str(output_dir / "inference") if save_raw_predictions else None
     evaluator = COCOEvaluator(dataset_name, tasks=tasks, output_dir=evaluator_output_dir)
@@ -151,13 +151,12 @@ def run_coco_eval(
 
 
 def save_score_distribution(
-    cfg,
+    predictor,
     dataset_dicts: list[dict],
     class_names: list[str],
     output_dir: Path,
     score_thresh: float,
 ) -> None:
-    predictor = MaskDINOPredictor(cfg)
     scores_per_class: dict[int, list[float]] = defaultdict(list)
     gt_counts_per_class: dict[int, int] = defaultdict(int)
 
@@ -199,13 +198,12 @@ def save_score_distribution(
 
 
 def save_iou_report(
-    cfg,
+    predictor,
     dataset_dicts: list[dict],
     class_names: list[str],
     output_dir: Path,
     score_thresh: float,
 ) -> None:
-    predictor = MaskDINOPredictor(cfg)
     iou_stats_per_class: dict[int, list[float]] = defaultdict(list)
     gt_counts_per_class: dict[int, int] = defaultdict(int)
 
@@ -261,7 +259,7 @@ def save_iou_report(
 
 
 def save_visualizations(
-    cfg,
+    predictor,
     dataset_dicts: list[dict],
     metadata,
     class_names: list[str],
@@ -274,7 +272,6 @@ def save_visualizations(
     if limit <= 0:
         return
 
-    predictor = MaskDINOPredictor(cfg)
     samples_by_class = select_samples_per_class(dataset_dicts, class_names, limit, seed)
 
     visualization_dir = output_dir / "visualizations" / "by_class"
@@ -321,6 +318,7 @@ def save_visualizations(
 
 def evaluate_split(
     cfg,
+    predictor,
     task: str,
     split_name: str,
     dataset_name: str,
@@ -341,16 +339,17 @@ def evaluate_split(
 
     coco_results = run_coco_eval(
         cfg,
+        predictor,
         dataset_name,
         split_output_dir,
         task,
         save_raw_predictions,
     )
     save_coco_results_txt(coco_results, class_names, split_output_dir)
-    save_score_distribution(cfg, dataset_dicts, class_names, split_output_dir, score_thresh)
-    save_iou_report(cfg, dataset_dicts, class_names, split_output_dir, score_thresh)
+    save_score_distribution(predictor, dataset_dicts, class_names, split_output_dir, score_thresh)
+    save_iou_report(predictor, dataset_dicts, class_names, split_output_dir, score_thresh)
     save_visualizations(
-        cfg,
+        predictor,
         dataset_dicts,
         metadata,
         class_names,
@@ -376,6 +375,7 @@ def main() -> None:
     cfg = build_cfg(args, len(class_names))
     register_task_datasets(args, class_names)
     inspect_category_consistency(args.train_json, args.test_json)
+    predictor = MaskDINOPredictor(cfg)
 
     split_configs = {
         "train": (f"{args.task}_train", args.train_json),
@@ -385,6 +385,7 @@ def main() -> None:
         dataset_name, json_path = split_configs[split_name]
         evaluate_split(
             cfg,
+            predictor,
             args.task,
             split_name,
             dataset_name,
