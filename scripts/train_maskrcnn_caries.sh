@@ -4,3 +4,4 @@ python maskrcnn_unify.py \
     --config_file configs/default_maskrcnn_caries_config.yaml \
     --output_dir output/maskrcnn_caries \
     --num_gpus 1 \
+    --wandb_name "maskrcnn_caries"
