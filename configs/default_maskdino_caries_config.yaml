@@ -53,6 +53,7 @@ MODEL:
       OBJECT_MASK_THRESHOLD: 0.5
 
 INPUT:
+  DATASET_MAPPER_NAME: coco_instance_detr
   MIN_SIZE_TRAIN:
   - 300
   - 400
