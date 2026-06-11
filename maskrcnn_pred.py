@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_test_loader
 from detectron2.engine import DefaultPredictor
-from detectron2.evaluation import COCOEvaluator, inference_on_dataset
+from detectron2.evaluation import COCOEvaluator, DatasetEvaluator, DatasetEvaluators, inference_on_dataset
 from detectron2.structures import Boxes, pairwise_iou
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
@@ -90,6 +90,52 @@ def apply_prediction_paths(args: argparse.Namespace) -> argparse.Namespace:
 
 def xywh_to_xyxy(boxes: list[list[float]]) -> list[list[float]]:
     return [[x, y, x + width, y + height] for x, y, width, height in boxes]
+
+
+def filter_instances(instances, score_thresh: float):
+    instances = instances.to("cpu")
+    if instances.has("scores"):
+        instances = instances[instances.scores >= score_thresh]
+    return instances
+
+
+class PredictionCollector(DatasetEvaluator):
+    def __init__(self, keep_masks_for: set[int]):
+        self.keep_masks_for = keep_masks_for
+        self.predictions: dict[int, object] = {}
+
+    def reset(self) -> None:
+        self.predictions.clear()
+
+    def process(self, inputs, outputs) -> None:
+        for input_record, output in zip(inputs, outputs):
+            instances = output["instances"].to("cpu")
+            image_id = input_record["image_id"]
+            if image_id not in self.keep_masks_for and instances.has("pred_masks"):
+                instances.remove("pred_masks")
+            self.predictions[image_id] = instances
+
+    def evaluate(self) -> dict:
+        return {}
+
+
+class ScoreFilteringEvaluator(DatasetEvaluator):
+    def __init__(self, evaluator: DatasetEvaluator, score_thresh: float):
+        self.evaluator = evaluator
+        self.score_thresh = score_thresh
+
+    def reset(self) -> None:
+        self.evaluator.reset()
+
+    def process(self, inputs, outputs) -> None:
+        filtered_outputs = [
+            {"instances": filter_instances(output["instances"], self.score_thresh)}
+            for output in outputs
+        ]
+        self.evaluator.process(inputs, filtered_outputs)
+
+    def evaluate(self):
+        return self.evaluator.evaluate()
 
 
 def inspect_coco_json(json_path: Path, split_name: str, output_dir: Path) -> None:
@@ -202,17 +248,26 @@ def inspect_category_consistency(train_json: Path, test_json: Path) -> None:
 
 def run_coco_eval(
     cfg,
+    predictor,
     dataset_name: str,
     output_dir: Path,
     save_raw_predictions: bool,
-) -> dict:
-    predictor = DefaultPredictor(cfg)
+    score_thresh: float,
+    keep_masks_for: set[int],
+) -> tuple[dict, dict[int, object]]:
     evaluator_output_dir = str(output_dir / "inference") if save_raw_predictions else None
-    evaluator = COCOEvaluator(dataset_name, output_dir=evaluator_output_dir)
+    coco_evaluator = COCOEvaluator(dataset_name, output_dir=evaluator_output_dir)
+    collector = PredictionCollector(keep_masks_for)
+    evaluator = DatasetEvaluators(
+        [
+            ScoreFilteringEvaluator(coco_evaluator, score_thresh),
+            collector,
+        ]
+    )
     val_loader = build_detection_test_loader(cfg, dataset_name)
     results = inference_on_dataset(predictor.model, val_loader, evaluator)
     print(results)
-    return results
+    return results, collector.predictions
 
 
 def save_coco_results_txt(results: dict, class_names: list[str], output_dir: Path) -> None:
@@ -239,11 +294,12 @@ def save_coco_results_txt(results: dict, class_names: list[str], output_dir: Pat
     (output_dir / "coco_results.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def save_score_distribution(cfg, dataset_dicts: list[dict], class_names: list[str], output_dir: Path) -> None:
-    cfg = cfg.clone()
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.05
-    predictor = DefaultPredictor(cfg)
-
+def save_score_distribution(
+    predictions: dict[int, object],
+    dataset_dicts: list[dict],
+    class_names: list[str],
+    output_dir: Path,
+) -> None:
     scores_per_class: dict[int, list[float]] = defaultdict(list)
     gt_counts_per_class: dict[int, int] = defaultdict(int)
 
@@ -251,11 +307,7 @@ def save_score_distribution(cfg, dataset_dicts: list[dict], class_names: list[st
         for ann in record.get("annotations", []):
             gt_counts_per_class[ann["category_id"]] += 1
 
-        image = cv2.imread(record["file_name"])
-        if image is None:
-            continue
-        with torch.no_grad():
-            instances = predictor(image)["instances"].to("cpu")
+        instances = filter_instances(predictions[record["image_id"]], 0.05)
         for cls_id, score in zip(instances.pred_classes.tolist(), instances.scores.tolist()):
             scores_per_class[cls_id].append(score)
 
@@ -285,11 +337,12 @@ def save_score_distribution(cfg, dataset_dicts: list[dict], class_names: list[st
     plt.close()
 
 
-def save_iou_report(cfg, dataset_dicts: list[dict], class_names: list[str], output_dir: Path) -> None:
-    cfg = cfg.clone()
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.05
-    predictor = DefaultPredictor(cfg)
-
+def save_iou_report(
+    predictions: dict[int, object],
+    dataset_dicts: list[dict],
+    class_names: list[str],
+    output_dir: Path,
+) -> None:
     iou_stats_per_class: dict[int, list[float]] = defaultdict(list)
     gt_counts_per_class: dict[int, int] = defaultdict(int)
 
@@ -297,11 +350,7 @@ def save_iou_report(cfg, dataset_dicts: list[dict], class_names: list[str], outp
         for ann in record.get("annotations", []):
             gt_counts_per_class[ann["category_id"]] += 1
 
-        image = cv2.imread(record["file_name"])
-        if image is None:
-            continue
-        with torch.no_grad():
-            instances = predictor(image)["instances"].to("cpu")
+        instances = filter_instances(predictions[record["image_id"]], 0.05)
 
         pred_boxes = instances.pred_boxes
         pred_classes = instances.pred_classes.tolist()
@@ -346,23 +395,16 @@ def save_iou_report(cfg, dataset_dicts: list[dict], class_names: list[str], outp
 
 
 def save_visualizations(
-    cfg,
-    dataset_dicts: list[dict],
+    predictions: dict[int, object],
     metadata,
     class_names: list[str],
+    samples_by_class: dict[int, list[dict]],
     output_dir: Path,
-    limit: int,
     score_thresh: float,
-    seed: int,
+    draw_masks: bool,
 ) -> None:
-    if limit <= 0:
+    if not samples_by_class:
         return
-
-    cfg = cfg.clone()
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_thresh
-    predictor = DefaultPredictor(cfg)
-    samples_by_class = select_samples_per_class(dataset_dicts, class_names, limit, seed)
-    draw_masks = bool(cfg.MODEL.MASK_ON)
 
     visualization_dir = output_dir / "visualizations" / "by_class"
     visualization_dir.mkdir(parents=True, exist_ok=True)
@@ -379,12 +421,11 @@ def save_visualizations(
                 if image is None:
                     print(f"Could not read image for visualization: {record['file_name']}")
                     continue
-                with torch.no_grad():
-                    outputs = predictor(image)
+                instances = filter_instances(predictions[image_id], score_thresh)
 
                 image_rgb = image[:, :, ::-1]
                 gt_vis = draw_gt_panel(image_rgb, metadata, record, draw_masks)
-                pred_vis = draw_pred_panel(image_rgb, metadata, outputs["instances"], draw_masks)
+                pred_vis = draw_pred_panel(image_rgb, metadata, instances, draw_masks)
                 gt_panel = add_panel_title(gt_vis, "GT")
                 pred_panel = add_panel_title(pred_vis, f"Pred score>={score_thresh:g}")
                 separator = np.full((gt_panel.shape[0], 8, 3), 255, dtype=np.uint8)
@@ -407,6 +448,7 @@ def save_visualizations(
 
 def evaluate_split(
     cfg,
+    predictor,
     split_name: str,
     dataset_name: str,
     json_path: Path,
@@ -422,25 +464,37 @@ def evaluate_split(
     inspect_coco_json(json_path, split_name, split_output_dir)
     dataset_dicts = list(DatasetCatalog.get(dataset_name))
     metadata = MetadataCatalog.get(dataset_name)
+    samples_by_class = (
+        select_samples_per_class(dataset_dicts, class_names, vis_samples, seed)
+        if vis_samples > 0
+        else {}
+    )
+    visualization_image_ids = {
+        record["image_id"]
+        for samples in samples_by_class.values()
+        for record in samples
+    }
 
-    coco_results = run_coco_eval(
+    coco_results, predictions = run_coco_eval(
         cfg,
+        predictor,
         dataset_name,
         split_output_dir,
         save_raw_predictions,
+        cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST,
+        visualization_image_ids,
     )
     save_coco_results_txt(coco_results, class_names, split_output_dir)
-    save_score_distribution(cfg, dataset_dicts, class_names, split_output_dir)
-    save_iou_report(cfg, dataset_dicts, class_names, split_output_dir)
+    save_score_distribution(predictions, dataset_dicts, class_names, split_output_dir)
+    save_iou_report(predictions, dataset_dicts, class_names, split_output_dir)
     save_visualizations(
-        cfg,
-        dataset_dicts,
+        predictions,
         metadata,
         class_names,
+        samples_by_class,
         split_output_dir,
-        limit=vis_samples,
         score_thresh=vis_score_thresh,
-        seed=seed,
+        draw_masks=bool(cfg.MODEL.MASK_ON),
     )
 
 
@@ -457,6 +511,13 @@ def main() -> None:
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = args.score_thresh
     register_datasets(args, class_names)
     inspect_category_consistency(args.train_json, args.test_json)
+    inference_cfg = cfg.clone()
+    inference_cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = min(
+        args.score_thresh,
+        args.vis_score_thresh,
+        0.05,
+    )
+    predictor = DefaultPredictor(inference_cfg)
 
     split_configs = {
         "train": (f"{args.task}_train", args.train_json),
@@ -466,6 +527,7 @@ def main() -> None:
         dataset_name, json_path = split_configs[split_name]
         evaluate_split(
             cfg,
+            predictor,
             split_name,
             dataset_name,
             json_path,

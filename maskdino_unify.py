@@ -75,6 +75,27 @@ warnings.filterwarnings(
 )
 
 
+class PointerFreeDetectionCheckpointer(DetectionCheckpointer):
+    """Resume from the newest checkpoint without writing last_checkpoint."""
+
+    def tag_last_checkpoint(self, last_filename_basename: str) -> None:
+        return
+
+    def _latest_checkpoint(self) -> str:
+        if not self.save_dir:
+            return ""
+        checkpoints = list(Path(self.save_dir).glob("model_*.pth"))
+        if not checkpoints:
+            return ""
+        return str(max(checkpoints, key=lambda path: path.stat().st_mtime))
+
+    def has_checkpoint(self) -> bool:
+        return bool(self._latest_checkpoint())
+
+    def get_checkpoint_file(self) -> str:
+        return self._latest_checkpoint()
+
+
 def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--config_file", dest="config_file", default=argparse.SUPPRESS)
     parser.add_argument("--num_gpus", dest="num_gpus", type=int, default=argparse.SUPPRESS)
@@ -394,7 +415,7 @@ class Trainer(DefaultTrainer):
         kwargs = {
             "trainer": weakref.proxy(self),
         }
-        self.checkpointer = DetectionCheckpointer(
+        self.checkpointer = PointerFreeDetectionCheckpointer(
             model,
             cfg.OUTPUT_DIR,
             **kwargs,
@@ -802,8 +823,16 @@ def setup(args):
     register_task_datasets(args, class_names)
 
     cfg.freeze()
-    default_setup(cfg, args)
-    setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="maskdino")
+    setup_cfg = cfg
+    logger_output = cfg.OUTPUT_DIR
+    if not comm.is_main_process():
+        setup_cfg = cfg.clone()
+        setup_cfg.defrost()
+        setup_cfg.OUTPUT_DIR = ""
+        setup_cfg.freeze()
+        logger_output = None
+    default_setup(setup_cfg, args)
+    setup_logger(output=logger_output, distributed_rank=comm.get_rank(), name="maskdino")
     return cfg
 
 
@@ -813,7 +842,7 @@ def main(args):
 
     if args.eval_only:
         model = UnifiedTrainer.build_model(cfg)
-        DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
+        PointerFreeDetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS,
             resume=args.resume,
         )

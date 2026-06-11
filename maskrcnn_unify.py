@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import types
 import warnings
 from collections import defaultdict
 from pathlib import Path
@@ -40,6 +41,29 @@ warnings.filterwarnings(
     message=r"`torch\.cuda\.amp\.autocast\(args\.\.\.\)` is deprecated.*",
     category=FutureWarning,
 )
+
+
+def configure_pointer_free_checkpointer(checkpointer) -> None:
+    def tag_last_checkpoint(self, last_filename_basename: str) -> None:
+        return
+
+    def latest_checkpoint(self) -> str:
+        if not self.save_dir:
+            return ""
+        checkpoints = list(Path(self.save_dir).glob("model_*.pth"))
+        if not checkpoints:
+            return ""
+        return str(max(checkpoints, key=lambda path: path.stat().st_mtime))
+
+    def has_checkpoint(self) -> bool:
+        return bool(latest_checkpoint(self))
+
+    def get_checkpoint_file(self) -> str:
+        return latest_checkpoint(self)
+
+    checkpointer.tag_last_checkpoint = types.MethodType(tag_last_checkpoint, checkpointer)
+    checkpointer.has_checkpoint = types.MethodType(has_checkpoint, checkpointer)
+    checkpointer.get_checkpoint_file = types.MethodType(get_checkpoint_file, checkpointer)
 
 
 def parse_args() -> argparse.Namespace:
@@ -418,6 +442,12 @@ class TqdmHook(HookBase):
 
 
 class Trainer(DefaultTrainer):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        # PeriodicCheckpointer keeps this same object, so patching it here
+        # disables the pointer file for both periodic and final saves.
+        configure_pointer_free_checkpointer(self.checkpointer)
+
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
         if output_folder is None and cfg.SAVE_RAW_PREDICTIONS:
