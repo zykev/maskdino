@@ -4,3 +4,4 @@ python maskrcnn_unify.py \
     --config_file configs/default_maskrcnn_orth_config.yaml \
     --output_dir output/maskrcnn_orth \
     --num_gpus 1 \
+    --wandb_name "maskrcnn_orth"

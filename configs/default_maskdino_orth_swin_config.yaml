@@ -53,7 +53,7 @@ MODEL:
     PRE_NORM: False
     ENFORCE_INPUT_PROJ: False
     SIZE_DIVISIBILITY: 32
-    DEC_LAYERS: 6
+    DEC_LAYERS: 4
     TRAIN_NUM_POINTS: 12544
     OVERSAMPLE_RATIO: 3.0
     IMPORTANCE_SAMPLE_RATIO: 0.75
@@ -61,7 +61,7 @@ MODEL:
     TWO_STAGE: True
     DN: "standard"
     DN_NUM: 50
-    INITIALIZE_BOX_TYPE: "bitmask"
+    INITIALIZE_BOX_TYPE: "mask2box"
     TEST:
       SEMANTIC_ON: False
       INSTANCE_ON: True
