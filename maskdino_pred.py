@@ -11,12 +11,9 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
 from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_test_loader
-from detectron2.data import transforms as T
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset
-from detectron2.modeling import build_model
 from detectron2.projects.deeplab import add_deeplab_config
 from detectron2.structures import Boxes, pairwise_iou
 from detectron2.utils.logger import setup_logger
@@ -24,8 +21,8 @@ from detectron2.utils.logger import setup_logger
 from maskdino import add_maskdino_config
 from maskdino_unify import (
     apply_default_paths,
-    configure_bbox_only_maskdino,
     load_categories,
+    MaskDINOPredictor,
     register_task_datasets,
 )
 from maskrcnn_unify import (
@@ -45,6 +42,12 @@ from maskrcnn_pred import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate unified MaskDINO caries/orth checkpoints.")
     parser.add_argument("--task", choices=["caries", "orth"], default="caries")
+    parser.add_argument(
+        "--config_file",
+        default=None,
+        type=Path,
+        help="Training config. Defaults to config.yaml beside the checkpoint when available.",
+    )
     parser.add_argument("--data_dir", default=None, type=Path)
     parser.add_argument("--train_json", default=None, type=Path)
     parser.add_argument("--test_json", default=None, type=Path)
@@ -60,11 +63,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score_thresh", default=0.05, type=float)
     parser.add_argument("--vis_score_thresh", default=0.5, type=float)
     parser.add_argument("--vis_samples", default=8, type=int, help="Maximum visualizations per GT class.")
+    parser.add_argument(
+        "--save_raw_predictions",
+        action="store_true",
+        help="Save COCOEvaluator raw predictions under each split's inference directory.",
+    )
     parser.add_argument("--keep_negative_ratio", default=None, type=float)
     parser.add_argument("--repeat_threshold", default=None, type=float)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("opts", nargs=argparse.REMAINDER, help="Extra config options in KEY VALUE form.")
     return parser.parse_args()
+
+
+def apply_prediction_paths(args: argparse.Namespace) -> None:
+    config_was_explicit = args.config_file is not None
+    apply_default_paths(args)
+
+    if config_was_explicit:
+        return
+
+    checkpoint_path = (
+        Path(args.weights)
+        if args.weights and "://" not in args.weights
+        else args.output_dir / "model_final.pth"
+    )
+    saved_config = checkpoint_path.parent / "config.yaml"
+    if saved_config.is_file():
+        args.config_file = saved_config
 
 
 def xywh_to_xyxy(boxes: list[list[float]]) -> list[list[float]]:
@@ -76,33 +101,6 @@ def filter_instances(instances, score_thresh: float):
     if instances.has("scores"):
         instances = instances[instances.scores >= score_thresh]
     return instances
-
-
-class MaskDINOPredictor:
-    """Small predictor wrapper matching MaskDINO's meta-architecture input path."""
-
-    def __init__(self, cfg):
-        self.cfg = cfg.clone()
-        self.model = build_model(self.cfg)
-        if getattr(self.cfg, "ORTH_BBOX_ONLY", False):
-            configure_bbox_only_maskdino(self.model)
-        self.model.eval()
-        DetectionCheckpointer(self.model).load(self.cfg.MODEL.WEIGHTS)
-        self.input_format = self.cfg.INPUT.FORMAT
-        # Match the eval-set loader transform (default DatasetMapper, is_train=False):
-        # ResizeShortestEdge(MIN_SIZE_TEST, MAX_SIZE_TEST) so inputs match training-time eval.
-        self.aug = T.ResizeShortestEdge(
-            [self.cfg.INPUT.MIN_SIZE_TEST, self.cfg.INPUT.MIN_SIZE_TEST], self.cfg.INPUT.MAX_SIZE_TEST
-        )
-
-    def __call__(self, original_image):
-        with torch.no_grad():
-            if self.input_format == "RGB":
-                original_image = original_image[:, :, ::-1]
-            height, width = original_image.shape[:2]
-            image = self.aug.get_transform(original_image).apply_image(original_image)
-            image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
-            return self.model([{"image": image, "height": height, "width": width}])[0]
 
 
 def build_cfg(args: argparse.Namespace, num_classes: int):
@@ -135,10 +133,17 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     return cfg
 
 
-def run_coco_eval(cfg, dataset_name: str, output_dir: Path, task: str) -> dict:
+def run_coco_eval(
+    cfg,
+    dataset_name: str,
+    output_dir: Path,
+    task: str,
+    save_raw_predictions: bool,
+) -> dict:
     predictor = MaskDINOPredictor(cfg)
     tasks = ("bbox",) if task == "orth" else None
-    evaluator = COCOEvaluator(dataset_name, tasks=tasks, output_dir=str(output_dir / "inference"))
+    evaluator_output_dir = str(output_dir / "inference") if save_raw_predictions else None
+    evaluator = COCOEvaluator(dataset_name, tasks=tasks, output_dir=evaluator_output_dir)
     val_loader = build_detection_test_loader(cfg, dataset_name)
     results = inference_on_dataset(predictor.model, val_loader, evaluator)
     print(results)
@@ -325,6 +330,7 @@ def evaluate_split(
     vis_samples: int,
     score_thresh: float,
     vis_score_thresh: float,
+    save_raw_predictions: bool,
 ) -> None:
     print(f"\nEvaluating {split_name} split: {json_path}")
     split_output_dir = Path(cfg.OUTPUT_DIR) / split_name
@@ -333,7 +339,13 @@ def evaluate_split(
     dataset_dicts = list(DatasetCatalog.get(dataset_name))
     metadata = MetadataCatalog.get(dataset_name)
 
-    coco_results = run_coco_eval(cfg, dataset_name, split_output_dir, task)
+    coco_results = run_coco_eval(
+        cfg,
+        dataset_name,
+        split_output_dir,
+        task,
+        save_raw_predictions,
+    )
     save_coco_results_txt(coco_results, class_names, split_output_dir)
     save_score_distribution(cfg, dataset_dicts, class_names, split_output_dir, score_thresh)
     save_iou_report(cfg, dataset_dicts, class_names, split_output_dir, score_thresh)
@@ -353,12 +365,13 @@ def evaluate_split(
 def main() -> None:
     setup_logger()
     args = parse_args()
-    apply_default_paths(args)
+    apply_prediction_paths(args)
     if args.keep_negative_ratio is None:
         args.keep_negative_ratio = 0.1 if args.task == "caries" else 0.2
     if not args.weights:
         args.weights = str(args.output_dir / "model_final.pth")
 
+    print(f"Using inference config: {args.config_file}")
     class_names = load_categories(args.train_json, args.task)
     cfg = build_cfg(args, len(class_names))
     register_task_datasets(args, class_names)
@@ -381,6 +394,7 @@ def main() -> None:
             vis_samples=args.vis_samples,
             score_thresh=args.score_thresh,
             vis_score_thresh=args.vis_score_thresh,
+            save_raw_predictions=args.save_raw_predictions,
         )
 
 

@@ -38,6 +38,12 @@ from maskrcnn_unify import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate unified Mask R-CNN caries/orth checkpoints.")
     parser.add_argument("--task", choices=["caries", "orth"], default="caries")
+    parser.add_argument(
+        "--config_file",
+        default=None,
+        type=Path,
+        help="Training config. Defaults to config.yaml beside the checkpoint when available.",
+    )
     parser.add_argument("--data_dir", default=None, type=Path)
     parser.add_argument("--train_json", default=None, type=Path)
     parser.add_argument("--test_json", default=None, type=Path)
@@ -53,10 +59,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score_thresh", default=0.05, type=float)
     parser.add_argument("--vis_score_thresh", default=0.5, type=float)
     parser.add_argument("--vis_samples", default=32, type=int, help="Maximum visualizations per GT class.")
+    parser.add_argument(
+        "--save_raw_predictions",
+        action="store_true",
+        help="Save COCOEvaluator raw predictions under each split's inference directory.",
+    )
     parser.add_argument("--keep_negative_ratio", default=None, type=float)
     parser.add_argument("--repeat_threshold", default=None, type=float)
     parser.add_argument("--seed", default=42, type=int)
     return parser.parse_args()
+
+
+def apply_prediction_paths(args: argparse.Namespace) -> argparse.Namespace:
+    config_was_explicit = args.config_file is not None
+    default_paths(args)
+
+    if config_was_explicit:
+        return args
+
+    checkpoint_path = (
+        Path(args.weights)
+        if args.weights and "://" not in args.weights
+        else args.output_dir / "model_final.pth"
+    )
+    saved_config = checkpoint_path.parent / "config.yaml"
+    if saved_config.is_file():
+        args.config_file = saved_config
+    return args
 
 
 def xywh_to_xyxy(boxes: list[list[float]]) -> list[list[float]]:
@@ -171,9 +200,15 @@ def inspect_category_consistency(train_json: Path, test_json: Path) -> None:
         print(f"  test={test_pairs}")
 
 
-def run_coco_eval(cfg, dataset_name: str, output_dir: Path) -> dict:
+def run_coco_eval(
+    cfg,
+    dataset_name: str,
+    output_dir: Path,
+    save_raw_predictions: bool,
+) -> dict:
     predictor = DefaultPredictor(cfg)
-    evaluator = COCOEvaluator(dataset_name, output_dir=str(output_dir / "inference"))
+    evaluator_output_dir = str(output_dir / "inference") if save_raw_predictions else None
+    evaluator = COCOEvaluator(dataset_name, output_dir=evaluator_output_dir)
     val_loader = build_detection_test_loader(cfg, dataset_name)
     results = inference_on_dataset(predictor.model, val_loader, evaluator)
     print(results)
@@ -379,6 +414,7 @@ def evaluate_split(
     seed: int,
     vis_samples: int,
     vis_score_thresh: float,
+    save_raw_predictions: bool,
 ) -> None:
     print(f"\nEvaluating {split_name} split: {json_path}")
     split_output_dir = Path(cfg.OUTPUT_DIR) / split_name
@@ -387,7 +423,12 @@ def evaluate_split(
     dataset_dicts = list(DatasetCatalog.get(dataset_name))
     metadata = MetadataCatalog.get(dataset_name)
 
-    coco_results = run_coco_eval(cfg, dataset_name, split_output_dir)
+    coco_results = run_coco_eval(
+        cfg,
+        dataset_name,
+        split_output_dir,
+        save_raw_predictions,
+    )
     save_coco_results_txt(coco_results, class_names, split_output_dir)
     save_score_distribution(cfg, dataset_dicts, class_names, split_output_dir)
     save_iou_report(cfg, dataset_dicts, class_names, split_output_dir)
@@ -405,10 +446,11 @@ def evaluate_split(
 
 def main() -> None:
     setup_logger()
-    args = default_paths(parse_args())
+    args = apply_prediction_paths(parse_args())
     if not args.weights:
         args.weights = str(args.output_dir / "model_final.pth")
 
+    print(f"Using inference config: {args.config_file}")
     class_names = load_categories(args.train_json, args.task)
     cfg = build_cfg(args, len(class_names))
     cfg.MODEL.WEIGHTS = args.weights
@@ -431,6 +473,7 @@ def main() -> None:
             seed=args.seed,
             vis_samples=args.vis_samples,
             vis_score_thresh=args.vis_score_thresh,
+            save_raw_predictions=args.save_raw_predictions,
         )
 
 

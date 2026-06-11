@@ -69,6 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat_threshold", default=None, type=float)
     parser.add_argument("--vis_samples", default=8, type=int, help="Maximum visualizations per GT class.")
     parser.add_argument("--vis_score_thresh", default=0.5, type=float)
+    parser.add_argument(
+        "--save_raw_predictions",
+        action="store_true",
+        help="Save COCOEvaluator raw predictions under the inference directory.",
+    )
     parser.add_argument("--log_period", default=100, type=int, help="Iteration interval for concise console logs.")
     parser.add_argument("--no_tqdm", action="store_true", help="Disable the training progress bar.")
     parser.add_argument("--seed", default=42, type=int)
@@ -252,6 +257,7 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
         cfg.WANDB.NAME = args.wandb_name
     cfg.TRAIN_LOG_PERIOD = getattr(args, "log_period", 100)
     cfg.TRAIN_TQDM = not getattr(args, "no_tqdm", False)
+    cfg.SAVE_RAW_PREDICTIONS = getattr(args, "save_raw_predictions", False)
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
     if weights:
@@ -261,6 +267,14 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     elif not cfg.MODEL.WEIGHTS:
         cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     return cfg
+
+
+def save_resolved_config(cfg) -> Path:
+    config_path = Path(cfg.OUTPUT_DIR) / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(cfg.dump(), encoding="utf-8")
+    print(f"Saved resolved config to {config_path}")
+    return config_path
 
 
 class LossEvalHook(HookBase):
@@ -406,7 +420,7 @@ class TqdmHook(HookBase):
 class Trainer(DefaultTrainer):
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
-        if output_folder is None:
+        if output_folder is None and cfg.SAVE_RAW_PREDICTIONS:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
         return COCOEvaluator(dataset_name, output_dir=output_folder)
 
@@ -445,7 +459,12 @@ class Trainer(DefaultTrainer):
 def evaluate(cfg) -> dict:
     predictor = DefaultPredictor(cfg)
     dataset_name = cfg.DATASETS.TEST[0]
-    evaluator = COCOEvaluator(dataset_name, output_dir=os.path.join(cfg.OUTPUT_DIR, "inference"))
+    evaluator_output_dir = (
+        os.path.join(cfg.OUTPUT_DIR, "inference")
+        if cfg.SAVE_RAW_PREDICTIONS
+        else None
+    )
+    evaluator = COCOEvaluator(dataset_name, output_dir=evaluator_output_dir)
     val_loader = build_detection_test_loader(cfg, dataset_name)
     results = inference_on_dataset(predictor.model, val_loader, evaluator)
     print(results)
@@ -573,6 +592,7 @@ def main() -> None:
         save_visualizations(cfg, args.vis_samples, args.seed, args.vis_score_thresh)
         return
 
+    save_resolved_config(cfg)
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
     trainer.train()
