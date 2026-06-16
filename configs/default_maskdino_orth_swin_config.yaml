@@ -12,7 +12,9 @@ MODEL:
     DROP_PATH_RATE: 0.2
     PATCH_NORM: True
     PRETRAIN_IMG_SIZE: 224
-  WEIGHTS:  "/home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth"
+  # Set this to a standard Swin-T checkpoint, or pass MODEL.WEIGHTS on the
+  # command line. For a Swin-MAE checkpoint, use the swin_mae config instead.
+  WEIGHTS: "/home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth"
   PIXEL_MEAN: [123.675, 116.280, 103.530]
   PIXEL_STD: [58.395, 57.120, 57.375]
   SEM_SEG_HEAD:
@@ -36,7 +38,7 @@ MODEL:
   MaskDINO:
     TRANSFORMER_DECODER_NAME: "MaskDINODecoder"
     DEEP_SUPERVISION: True
-    NO_OBJECT_WEIGHT: 1.0
+    NO_OBJECT_WEIGHT: 0.1
     CLASS_WEIGHT: 4.0
     MASK_WEIGHT: 0.0
     DICE_WEIGHT: 0.0
