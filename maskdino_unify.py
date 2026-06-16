@@ -48,6 +48,7 @@ from detectron2.modeling import build_model
 from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
 from detectron2.solver.build import maybe_add_gradient_clipping
 from detectron2.structures import BoxMode
+from detectron2.utils.env import seed_all_rng
 from detectron2.utils.events import EventWriter, JSONWriter, TensorboardXWriter, get_event_storage
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
@@ -823,16 +824,13 @@ def setup(args):
     register_task_datasets(args, class_names)
 
     cfg.freeze()
-    setup_cfg = cfg
-    logger_output = cfg.OUTPUT_DIR
-    if not comm.is_main_process():
-        setup_cfg = cfg.clone()
-        setup_cfg.defrost()
-        setup_cfg.OUTPUT_DIR = ""
-        setup_cfg.freeze()
-        logger_output = None
-    default_setup(setup_cfg, args)
-    setup_logger(output=logger_output, distributed_rank=comm.get_rank(), name="maskdino")
+    if comm.is_main_process():
+        default_setup(cfg, args)
+        setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="maskdino")
+    else:
+        seed = getattr(cfg, "SEED", -1)
+        seed_all_rng(None if seed < 0 else seed + comm.get_rank())
+        setup_logger(output=None, distributed_rank=comm.get_rank(), name="maskdino")
     return cfg
 
 
