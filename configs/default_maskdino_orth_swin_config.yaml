@@ -14,7 +14,7 @@ MODEL:
     PRETRAIN_IMG_SIZE: 224
   # Set this to a standard Swin-T checkpoint, or pass MODEL.WEIGHTS on the
   # command line. For a Swin-MAE checkpoint, use the swin_mae config instead.
-  WEIGHTS: "/home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth"
+  WEIGHTS: /home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth
   PIXEL_MEAN: [123.675, 116.280, 103.530]
   PIXEL_STD: [58.395, 57.120, 57.375]
   SEM_SEG_HEAD:
