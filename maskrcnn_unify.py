@@ -20,7 +20,7 @@ import detectron2.engine.hooks as d2_hooks
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import DatasetCatalog, DatasetMapper, MetadataCatalog, build_detection_test_loader
-from detectron2.engine import DefaultPredictor, DefaultTrainer
+from detectron2.engine import DefaultPredictor, DefaultTrainer, launch
 from detectron2.engine.hooks import HookBase
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset
 from detectron2.structures import BoxMode
@@ -75,6 +75,10 @@ def parse_args() -> argparse.Namespace:
         help="caries: single_tooth instance segmentation; orth: orthodontic object detection.",
     )
     parser.add_argument("--config_file", default=None, type=Path)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--num_machines", type=int, default=1)
+    parser.add_argument("--machine_rank", type=int, default=0)
+    parser.add_argument("--dist_url", default=None)
     parser.add_argument("--data_dir", default=None, type=Path)
     parser.add_argument("--train_json", default=None, type=Path)
     parser.add_argument("--test_json", default=None, type=Path)
@@ -610,9 +614,9 @@ def save_visualizations(cfg, limit: int, seed: int, score_thresh: float) -> None
     print(f"Saved visualizations to {output_dir}")
 
 
-def main() -> None:
+def main(args: argparse.Namespace) -> None:
     setup_logger()
-    args = default_paths(parse_args())
+    args = default_paths(args)
     class_names = load_categories(args.train_json, args.task)
     cfg = build_cfg(args, len(class_names))
     register_datasets(args, class_names)
@@ -634,4 +638,14 @@ def main() -> None:
 
 if __name__ == "__main__":
     torch.multiprocessing.set_sharing_strategy("file_system")
-    main()
+    args = parse_args()
+    if args.dist_url is None:
+        args.dist_url = f"tcp://127.0.0.1:{random.randint(1000, 20000)}"
+    launch(
+        main,
+        args.num_gpus,
+        num_machines=args.num_machines,
+        machine_rank=args.machine_rank,
+        dist_url=args.dist_url,
+        args=(args,),
+    )
