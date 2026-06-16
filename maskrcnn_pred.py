@@ -21,6 +21,7 @@ from detectron2.structures import Boxes, pairwise_iou
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
 
+from task_paths import add_input_dir_arg
 from maskrcnn_unify import (
     add_panel_title,
     build_cfg,
@@ -44,9 +45,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Training config. Defaults to config.yaml beside the checkpoint when available.",
     )
-    parser.add_argument("--data_dir", default=None, type=Path)
-    parser.add_argument("--train_json", default=None, type=Path)
-    parser.add_argument("--test_json", default=None, type=Path)
+    add_input_dir_arg(parser)
     parser.add_argument("--weights", default="", help="Checkpoint path. Defaults to output_dir/model_final.pth.")
     parser.add_argument("--output_dir", default=None, type=Path)
     parser.add_argument(
