@@ -634,6 +634,7 @@ def matcher_bbox_only_forward(self, outputs, targets, cost=("cls", "box")):
 
 
 def configure_bbox_only_maskdino(model) -> None:
+    model.focus_on_box = True
     model.prepare_targets = types.MethodType(prepare_bbox_only_targets, model)
     model.prepare_targets_detr = types.MethodType(prepare_bbox_only_targets, model)
 
@@ -830,6 +831,8 @@ def setup(args):
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
     if hasattr(cfg.MODEL, "MaskDINO"):
         cfg.MODEL.MaskDINO.NUM_CLASSES = num_classes
+        if args.task == "orth":
+            cfg.MODEL.MaskDINO.TEST.TEST_FOUCUS_ON_BOX = True
 
     register_task_datasets(args, class_names)
 
