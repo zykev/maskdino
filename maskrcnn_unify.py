@@ -41,6 +41,11 @@ warnings.filterwarnings(
     message=r"`torch\.cuda\.amp\.autocast\(args\.\.\.\)` is deprecated.*",
     category=FutureWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=r"Detected call of `lr_scheduler\.step\(\)` before `optimizer\.step\(\)`.*",
+    category=UserWarning,
+)
 
 
 def configure_pointer_free_checkpointer(checkpointer) -> None:

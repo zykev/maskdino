@@ -74,6 +74,16 @@ warnings.filterwarnings(
     message=r"`torch\.cuda\.amp\.autocast\(args\.\.\.\)` is deprecated.*",
     category=FutureWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=r"Detected call of `lr_scheduler\.step\(\)` before `optimizer\.step\(\)`.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"torch\.meshgrid: in an upcoming release, it will be required to pass the indexing argument.*",
+    category=UserWarning,
+)
 
 
 class PointerFreeDetectionCheckpointer(DetectionCheckpointer):
