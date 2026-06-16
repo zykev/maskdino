@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=2 \
+CUDA_VISIBLE_DEVICES=3 \
 python maskdino_pred.py \
   --task orth \
   --weights output/maskdino_swin_ort_0616/model_final.pth \

@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=1 \
+CUDA_VISIBLE_DEVICES=4 \
 python maskrcnn_pred.py \
   --task orth \
   --weights output/maskrcnn_orth_0616/model_final.pth \
