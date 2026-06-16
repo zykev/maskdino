@@ -63,13 +63,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-dir",
-        default=".datasets/intraoral_anno/orth_test",
+        default=".datasets/intraoral_anno/orth_0616/orth_0616",
         type=Path,
         help="Folder containing images and LabelMe JSON files.",
     )
     parser.add_argument(
         "--out-dir",
-        default="orth_test_annotation_analysis",
+        default="output/orth_annotation_analysis",
         type=Path,
         help="Output folder for montages and statistics.",
     )
@@ -81,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cols",
-        default=4,
+        default=8,
         type=int,
         help="Number of columns in each montage.",
     )

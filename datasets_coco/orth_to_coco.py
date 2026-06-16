@@ -237,13 +237,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-dir",
-        default=".datasets/intraoral_anno/orth_test/orth_test",
+        default=".datasets/intraoral_anno/orth_0616/orth_0616",
         type=Path,
         help="Root folder containing patient/sample subfolders.",
     )
     parser.add_argument(
         "--output-json",
-        default=".datasets/intraoral_anno/orth_test/orth_detection_coco.json",
+        default=".datasets/intraoral_anno/orth_0616/orth_detection_coco.json",
         type=Path,
         help="Output COCO JSON path.",
     )

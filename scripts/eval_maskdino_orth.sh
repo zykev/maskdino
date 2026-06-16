@@ -1,7 +1,6 @@
 CUDA_VISIBLE_DEVICES=2 \
 python maskdino_pred.py \
   --task orth \
-  --data_dir .datasets/intraoral_anno/orth_test/orth_test \
-  --weights output/maskdino_orth_swin/model_final.pth \
-  --output_dir output/maskdino_orth_swin_pred \
+  --weights output/maskdino_swin_ort_0616/model_final.pth \
+  --output_dir output/maskdino_swin_orth_pred \
   --eval_splits train test \

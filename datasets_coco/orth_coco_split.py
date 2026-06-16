@@ -14,19 +14,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Group-aware train/test split for COCO JSON.")
     parser.add_argument(
         "--input-json",
-        default=".datasets/intraoral_anno/orth_test/orth_detection_coco.json",
+        default=".datasets/intraoral_anno/orth_0616/orth_detection_coco.json",
         type=Path,
         help="Input COCO JSON.",
     )
     parser.add_argument(
         "--train-json",
-        default=".datasets/intraoral_anno/orth_test/orth_detection_train.json",
+        default=".datasets/intraoral_anno/orth_0616/orth_detection_train.json",
         type=Path,
         help="Output train COCO JSON.",
     )
     parser.add_argument(
         "--test-json",
-        default=".datasets/intraoral_anno/orth_test/orth_detection_test.json",
+        default=".datasets/intraoral_anno/orth_0616/orth_detection_test.json",
         type=Path,
         help="Output test COCO JSON.",
     )
