@@ -24,7 +24,15 @@ from ..utils.misc import is_dist_avail_and_initialized, nested_tensor_from_tenso
 from maskdino.utils import box_ops
 
 
-def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2):
+def sigmoid_focal_loss(
+    inputs,
+    targets,
+    num_boxes,
+    alpha: float = 0.25,
+    gamma: float = 2,
+    class_weights=None,
+    negative_weight: float = 1.0,
+):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -49,6 +57,13 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
 
+    if class_weights is not None:
+        class_weights = class_weights.to(dtype=loss.dtype, device=loss.device)
+        weight_shape = [1] * (targets.dim() - 1) + [class_weights.numel()]
+        positive_weights = class_weights.view(weight_shape)
+        loss = loss * (targets * positive_weights + (1 - targets) * negative_weight)
+    elif negative_weight != 1.0:
+        loss = loss * (targets + (1 - targets) * negative_weight)
 
     return loss.mean(1).sum() / num_boxes
 
@@ -130,7 +145,8 @@ class SetCriterion(nn.Module):
     """
 
     def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses,
-                 num_points, oversample_ratio, importance_sample_ratio,dn="no",dn_losses=[], panoptic_on=False, semantic_ce_loss=False):
+                 num_points, oversample_ratio, importance_sample_ratio,dn="no",dn_losses=[], panoptic_on=False, semantic_ce_loss=False,
+                 class_weights=None, focal_gamma=2.0, negative_weight=1.0):
         """Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -150,12 +166,23 @@ class SetCriterion(nn.Module):
         empty_weight = torch.ones(self.num_classes + 1)
         empty_weight[-1] = self.eos_coef
         self.register_buffer("empty_weight", empty_weight)
+        if class_weights is None:
+            class_weights = torch.ones(self.num_classes)
+        else:
+            class_weights = torch.as_tensor(class_weights, dtype=torch.float)
+            if class_weights.numel() != self.num_classes:
+                raise ValueError(
+                    f"class_weights must have {self.num_classes} values, got {class_weights.numel()}"
+                )
+        self.register_buffer("class_weights", class_weights)
 
         # pointwise mask loss parameters
         self.num_points = num_points
         self.oversample_ratio = oversample_ratio
         self.importance_sample_ratio = importance_sample_ratio
         self.focal_alpha = 0.25
+        self.focal_gamma = focal_gamma
+        self.negative_weight = negative_weight
 
         self.panoptic_on = panoptic_on
         self.semantic_ce_loss = semantic_ce_loss
@@ -196,7 +223,15 @@ class SetCriterion(nn.Module):
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
         target_classes_onehot = target_classes_onehot[:,:,:-1]
-        loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+        loss_ce = sigmoid_focal_loss(
+            src_logits,
+            target_classes_onehot,
+            num_boxes,
+            alpha=self.focal_alpha,
+            gamma=self.focal_gamma,
+            class_weights=self.class_weights,
+            negative_weight=self.negative_weight,
+        ) * src_logits.shape[1]
         losses = {'loss_ce': loss_ce}
 
         return losses

@@ -145,4 +145,16 @@ def add_maskdino_config(cfg):
     cfg.MODEL.SWIN.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
     cfg.MODEL.SWIN.USE_CHECKPOINT = False
 
+    # Orthodontic detection class-balance options. These are consumed by the
+    # unified orth runner and left disabled by default for other tasks.
+    cfg.ORTH_CLASS_BALANCE = CN()
+    cfg.ORTH_CLASS_BALANCE.ENABLED = False
+    cfg.ORTH_CLASS_BALANCE.BETA = 0.999
+    cfg.ORTH_CLASS_BALANCE.CLIP_MIN = 0.25
+    cfg.ORTH_CLASS_BALANCE.CLIP_MAX = 5.0
+    cfg.ORTH_CLASS_BALANCE.LOSS_TYPE = "positive_focal"
+    cfg.ORTH_CLASS_BALANCE.FOCAL_GAMMA = 2.0
+    cfg.ORTH_CLASS_BALANCE.BACKGROUND_WEIGHT = 1.0
+    cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS = []
+
     cfg.Default_loading=True  # a bug in my d2. resume use this; if first time ResNet load, set it false

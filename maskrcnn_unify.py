@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import detectron2.engine.hooks as d2_hooks
 from detectron2 import model_zoo
+from detectron2.config import CfgNode as CN
 from detectron2.config import get_cfg
 from detectron2.data import DatasetCatalog, DatasetMapper, MetadataCatalog, build_detection_test_loader
 from detectron2.engine import DefaultPredictor, DefaultTrainer, launch
@@ -28,6 +29,7 @@ from detectron2.utils.events import EventWriter, JSONWriter, TensorboardXWriter,
 from detectron2.utils.logger import setup_logger
 from detectron2.utils.visualizer import Visualizer
 import detectron2.utils.comm as comm
+import torch.nn.functional as F
 
 from datasets_coco.datasets_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
 
@@ -139,6 +141,109 @@ def load_categories(json_path: Path, task: str) -> list[str]:
     return [category["name"] for category in sorted(data["categories"], key=lambda item: item["id"])]
 
 
+def compute_effective_class_weights(
+    json_path: Path,
+    num_classes: int,
+    *,
+    beta: float,
+    clip_min: float,
+    clip_max: float,
+) -> list[float]:
+    with json_path.open("r", encoding="utf-8") as f:
+        coco_data = json.load(f)
+
+    counts = np.zeros(num_classes, dtype=np.float64)
+    for ann in coco_data.get("annotations", []):
+        class_index = int(ann["category_id"]) - 1
+        if 0 <= class_index < num_classes:
+            counts[class_index] += 1.0
+
+    effective_counts = np.maximum(counts, 1.0)
+    weights = (1.0 - beta) / (1.0 - np.power(beta, effective_counts))
+    weights = np.clip(weights, clip_min, clip_max)
+    weights = weights * (num_classes / weights.sum())
+    print(
+        "Orth class-balance counts:",
+        {index: int(count) for index, count in enumerate(counts.tolist())},
+    )
+    print("Orth effective-number weights:", [round(float(weight), 4) for weight in weights])
+    return [float(weight) for weight in weights]
+
+
+def add_class_balance_config(cfg) -> None:
+    cfg.ORTH_CLASS_BALANCE = CN()
+    cfg.ORTH_CLASS_BALANCE.ENABLED = False
+    cfg.ORTH_CLASS_BALANCE.BETA = 0.999
+    cfg.ORTH_CLASS_BALANCE.CLIP_MIN = 0.25
+    cfg.ORTH_CLASS_BALANCE.CLIP_MAX = 5.0
+    cfg.ORTH_CLASS_BALANCE.LOSS_TYPE = "weighted_ce"
+    cfg.ORTH_CLASS_BALANCE.FOCAL_GAMMA = 2.0
+    cfg.ORTH_CLASS_BALANCE.BACKGROUND_WEIGHT = 1.0
+    cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS = []
+
+
+def configure_maskrcnn_class_balance(model, cfg) -> None:
+    class_weights = list(getattr(cfg.ORTH_CLASS_BALANCE, "CLASS_WEIGHTS", []))
+    if not class_weights:
+        return
+
+    if hasattr(model, "module"):
+        model = model.module
+    if not hasattr(model, "roi_heads") or not hasattr(model.roi_heads, "box_predictor"):
+        return
+
+    predictor = model.roi_heads.box_predictor
+    original_losses = predictor.losses
+    loss_type = str(cfg.ORTH_CLASS_BALANCE.LOSS_TYPE).lower()
+    focal_gamma = float(cfg.ORTH_CLASS_BALANCE.FOCAL_GAMMA)
+    background_weight = float(cfg.ORTH_CLASS_BALANCE.BACKGROUND_WEIGHT)
+
+    def balanced_losses(self, predictions, proposals):
+        losses = original_losses(predictions, proposals)
+        scores = predictions[0]
+        gt_classes = [
+            proposal.gt_classes
+            for proposal in proposals
+            if len(proposal) and proposal.has("gt_classes")
+        ]
+        if gt_classes:
+            gt_classes = torch.cat(gt_classes, dim=0)
+        else:
+            gt_classes = torch.empty(0, dtype=torch.int64, device=scores.device)
+
+        valid = (gt_classes >= 0) & (gt_classes < scores.shape[1])
+        if not torch.any(valid):
+            losses["loss_cls"] = scores.sum() * 0.0
+            return losses
+
+        scores = scores[valid]
+        gt_classes = gt_classes[valid]
+        weight_vector = torch.ones(scores.shape[1], dtype=scores.dtype, device=scores.device)
+        positive_count = min(len(class_weights), scores.shape[1] - 1)
+        weight_vector[:positive_count] = torch.as_tensor(
+            class_weights[:positive_count],
+            dtype=scores.dtype,
+            device=scores.device,
+        )
+        if scores.shape[1] > positive_count:
+            weight_vector[-1] = background_weight
+
+        sample_weights = weight_vector[gt_classes]
+        cls_loss = F.cross_entropy(scores, gt_classes, reduction="none")
+        if loss_type == "focal":
+            probabilities = F.softmax(scores, dim=1)
+            p_t = probabilities.gather(1, gt_classes[:, None]).squeeze(1)
+            cls_loss = cls_loss * torch.pow(1.0 - p_t, focal_gamma)
+        elif loss_type != "weighted_ce":
+            raise ValueError(f"Unsupported ORTH_CLASS_BALANCE.LOSS_TYPE: {loss_type}")
+
+        losses["loss_cls"] = (cls_loss * sample_weights).sum() / sample_weights.sum().clamp_min(1.0)
+        return losses
+
+    predictor.losses = types.MethodType(balanced_losses, predictor)
+    print(f"Enabled orth Mask R-CNN class-balanced ROI {loss_type} loss")
+
+
 def resolve_image_path(data_dir: Path, file_name: str) -> str:
     path = Path(file_name)
     if path.is_absolute() or path.exists():
@@ -242,6 +347,7 @@ def register_datasets(args: argparse.Namespace, class_names: list[str]) -> None:
 def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg = get_cfg()
     cfg.set_new_allowed(True)
+    add_class_balance_config(cfg)
     cfg.DATALOADER.KEEP_NEGATIVE_RATIO = 0.5
     cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
     if args.config_file:
@@ -291,6 +397,14 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg.TRAIN_LOG_PERIOD = getattr(args, "log_period", 100)
     cfg.TRAIN_TQDM = not getattr(args, "no_tqdm", False)
     cfg.SAVE_RAW_PREDICTIONS = getattr(args, "save_raw_predictions", False)
+    if args.task == "orth" and cfg.ORTH_CLASS_BALANCE.ENABLED:
+        cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS = compute_effective_class_weights(
+            args.train_json,
+            num_classes,
+            beta=float(cfg.ORTH_CLASS_BALANCE.BETA),
+            clip_min=float(cfg.ORTH_CLASS_BALANCE.CLIP_MIN),
+            clip_max=float(cfg.ORTH_CLASS_BALANCE.CLIP_MAX),
+        )
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
     if weights:
@@ -456,6 +570,8 @@ class Trainer(DefaultTrainer):
         # PeriodicCheckpointer keeps this same object, so patching it here
         # disables the pointer file for both periodic and final saves.
         configure_pointer_free_checkpointer(self.checkpointer)
+        if getattr(cfg, "ORTH_CLASS_BALANCE", None) and cfg.ORTH_CLASS_BALANCE.ENABLED:
+            configure_maskrcnn_class_balance(self.model, cfg)
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):

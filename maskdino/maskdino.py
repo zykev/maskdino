@@ -183,6 +183,21 @@ class MaskDINO(nn.Module):
             dn_losses=dn_losses,
             panoptic_on=cfg.MODEL.MaskDINO.PANO_BOX_LOSS,
             semantic_ce_loss=cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON and cfg.MODEL.MaskDINO.SEMANTIC_CE_LOSS and not cfg.MODEL.MaskDINO.TEST.PANOPTIC_ON,
+            class_weights=(
+                cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS
+                if hasattr(cfg, "ORTH_CLASS_BALANCE") and cfg.ORTH_CLASS_BALANCE.ENABLED
+                else None
+            ),
+            focal_gamma=(
+                cfg.ORTH_CLASS_BALANCE.FOCAL_GAMMA
+                if hasattr(cfg, "ORTH_CLASS_BALANCE") and cfg.ORTH_CLASS_BALANCE.ENABLED
+                else 2.0
+            ),
+            negative_weight=(
+                no_object_weight
+                if hasattr(cfg, "ORTH_CLASS_BALANCE") and cfg.ORTH_CLASS_BALANCE.ENABLED
+                else 1.0
+            ),
         )
 
         return {

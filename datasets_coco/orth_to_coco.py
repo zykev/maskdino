@@ -21,6 +21,7 @@ import base64
 import io
 import json
 import re
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -229,6 +230,62 @@ CATEGORIES_INFO = [
 ]
 
 CATEGORY_MAP = {category["name"]: category["id"] for category in CATEGORIES_INFO}
+CATEGORY_INFO_BY_NAME = {category["name"]: category for category in CATEGORIES_INFO}
+
+
+def build_supercategory_info() -> tuple[dict[str, int], list[dict], dict[str, dict]]:
+    supercategory_to_codes: dict[str, list[str]] = defaultdict(list)
+    for category in CATEGORIES_INFO:
+        supercategory_to_codes[category["supercategory"]].append(category["name"])
+
+    categories = []
+    label_to_category_id = {}
+    label_metadata = {}
+    for category in CATEGORIES_INFO:
+        label = category["name"]
+        supercategory = category["supercategory"]
+        if supercategory not in label_to_category_id:
+            category_id = len(categories) + 1
+            label_to_category_id[supercategory] = category_id
+            categories.append(
+                {
+                    "id": category_id,
+                    "name": supercategory,
+                    "supercategory": "orthodontic_anomaly",
+                    "source_codes": supercategory_to_codes[supercategory],
+                }
+            )
+        label_to_category_id[label] = label_to_category_id[supercategory]
+        label_metadata[label] = {
+            "orth_code": label,
+            "orth_code_id": category["id"],
+            "orth_supercategory": supercategory,
+        }
+    return label_to_category_id, categories, label_metadata
+
+
+def parse_severity(label: str) -> int | None:
+    match = re.match(r"^(\d+)", label)
+    return int(match.group(1)) if match else None
+
+
+def parse_severity_cutoffs(cutoffs: str | None) -> list[int]:
+    if not cutoffs:
+        return []
+    values = []
+    for item in cutoffs.split(","):
+        item = item.strip()
+        if item:
+            values.append(int(item))
+    return sorted(values)
+
+
+def severity_group(severity_raw: int | None, cutoffs: list[int]) -> int | None:
+    if severity_raw is None:
+        return None
+    if not cutoffs:
+        return severity_raw
+    return 1 + sum(severity_raw > cutoff for cutoff in cutoffs)
 
 
 def parse_args() -> argparse.Namespace:
@@ -257,6 +314,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--label-mode",
+        choices=["code", "supercategory"],
+        default="supercategory",
+        help=(
+            "code keeps the original 32 IOTN/DHC classes; supercategory maps "
+            "annotation category_id values to broader orthodontic anomaly groups."
+        ),
+    )
+    parser.add_argument(
+        "--severity-cutoffs",
+        default=None,
+        help=(
+            "Optional comma-separated severity cutoffs for annotation metadata. "
+            "For example, 3,4 maps raw severities to <=3, 4, and >4 groups."
+        ),
+    )
+    parser.add_argument(
         "--drop-empty-images",
         action="store_true",
         help="Do not include images without valid annotations.",
@@ -264,15 +338,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def categories_from_labels(labels: list[str] | None) -> tuple[dict[str, int], list[dict]]:
+def categories_from_labels(
+    labels: list[str] | None,
+    label_mode: str,
+) -> tuple[dict[str, int], list[dict], dict[str, dict]]:
+    if label_mode == "supercategory" and labels is None:
+        return build_supercategory_info()
+
     if labels is None:
-        return CATEGORY_MAP, CATEGORIES_INFO
+        label_metadata = {
+            category["name"]: {
+                "orth_code": category["name"],
+                "orth_code_id": category["id"],
+                "orth_supercategory": category["supercategory"],
+            }
+            for category in CATEGORIES_INFO
+        }
+        return CATEGORY_MAP, CATEGORIES_INFO, label_metadata
+
+    if label_mode == "supercategory":
+        raise ValueError("--labels can only be used with --label-mode code")
 
     categories = [
         {"id": index + 1, "name": label, "supercategory": "orthodontic_anomaly"}
         for index, label in enumerate(labels)
     ]
-    return {category["name"]: category["id"] for category in categories}, categories
+    label_metadata = {
+        category["name"]: {
+            "orth_code": category["name"],
+            "orth_code_id": CATEGORY_INFO_BY_NAME.get(category["name"], {}).get("id"),
+            "orth_supercategory": CATEGORY_INFO_BY_NAME.get(category["name"], {}).get("supercategory"),
+        }
+        for category in categories
+    }
+    return {category["name"]: category["id"] for category in categories}, categories, label_metadata
 
 
 def natural_key(text: str) -> list[object]:
@@ -391,10 +490,13 @@ def convert_to_coco(
     data_dir: Path,
     output_json: Path,
     labels: list[str] | None,
+    label_mode: str,
+    severity_cutoffs: str | None,
     drop_empty_images: bool,
 ) -> None:
     data_dir = data_dir.resolve()
-    label_to_category_id, categories_info = categories_from_labels(labels)
+    label_to_category_id, categories_info, label_metadata = categories_from_labels(labels, label_mode)
+    severity_cutoff_values = parse_severity_cutoffs(severity_cutoffs)
 
     coco = {
         "info": {
@@ -453,6 +555,17 @@ def convert_to_coco(
                     "area": area,
                     "iscrowd": 0,
                 }
+                metadata = label_metadata.get(label, {})
+                severity_raw = parse_severity(label)
+                ann.update(
+                    {
+                        "orth_code": metadata.get("orth_code", label),
+                        "orth_code_id": metadata.get("orth_code_id"),
+                        "orth_supercategory": metadata.get("orth_supercategory"),
+                        "severity_raw": severity_raw,
+                        "severity_id": severity_group(severity_raw, severity_cutoff_values),
+                    }
+                )
                 if len(points) >= 3:
                     ann["segmentation"] = [flat_points]
                 annotations.append(ann)
@@ -499,5 +612,7 @@ if __name__ == "__main__":
         data_dir=args.data_dir,
         output_json=args.output_json,
         labels=args.labels,
+        label_mode=args.label_mode,
+        severity_cutoffs=args.severity_cutoffs,
         drop_empty_images=args.drop_empty_images,
     )

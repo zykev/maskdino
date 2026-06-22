@@ -161,6 +161,35 @@ def load_categories(json_path: Path, task: str) -> list[str]:
     return [category["name"] for category in sorted(data["categories"], key=lambda item: item["id"])]
 
 
+def compute_effective_class_weights(
+    json_path: Path,
+    num_classes: int,
+    *,
+    beta: float,
+    clip_min: float,
+    clip_max: float,
+) -> list[float]:
+    with json_path.open("r", encoding="utf-8") as f:
+        coco_data = json.load(f)
+
+    counts = np.zeros(num_classes, dtype=np.float64)
+    for ann in coco_data.get("annotations", []):
+        class_index = int(ann["category_id"]) - 1
+        if 0 <= class_index < num_classes:
+            counts[class_index] += 1.0
+
+    effective_counts = np.maximum(counts, 1.0)
+    weights = (1.0 - beta) / (1.0 - np.power(beta, effective_counts))
+    weights = np.clip(weights, clip_min, clip_max)
+    weights = weights * (num_classes / weights.sum())
+    print(
+        "Orth class-balance counts:",
+        {index: int(count) for index, count in enumerate(counts.tolist())},
+    )
+    print("Orth effective-number weights:", [round(float(weight), 4) for weight in weights])
+    return [float(weight) for weight in weights]
+
+
 def resolve_image_path(data_dir: Path, file_name: str) -> str:
     path = Path(file_name)
     if path.is_absolute() or path.exists():
@@ -833,6 +862,20 @@ def setup(args):
         cfg.MODEL.MaskDINO.NUM_CLASSES = num_classes
         if args.task == "orth":
             cfg.MODEL.MaskDINO.TEST.TEST_FOUCUS_ON_BOX = True
+    if args.task == "orth" and cfg.ORTH_CLASS_BALANCE.ENABLED:
+        loss_type = str(cfg.ORTH_CLASS_BALANCE.LOSS_TYPE).lower()
+        if loss_type != "positive_focal":
+            raise ValueError(
+                "MaskDINO orth class balance currently supports only "
+                f"LOSS_TYPE=positive_focal, got {loss_type}"
+            )
+        cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS = compute_effective_class_weights(
+            args.train_json,
+            num_classes,
+            beta=float(cfg.ORTH_CLASS_BALANCE.BETA),
+            clip_min=float(cfg.ORTH_CLASS_BALANCE.CLIP_MIN),
+            clip_max=float(cfg.ORTH_CLASS_BALANCE.CLIP_MAX),
+        )
 
     register_task_datasets(args, class_names)
 
