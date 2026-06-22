@@ -115,7 +115,7 @@ CATEGORIES_INFO = [
     },
     {
         "id": 14,
-        "name": "4l",
+        "name": "4i",
         "supercategory": "crossbite",
         "description": "Posterior lingual crossbite with no functional occlusal contact",
     },
