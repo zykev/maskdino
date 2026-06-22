@@ -59,6 +59,7 @@ except ImportError:
     tqdm = None
 
 from datasets_coco.datasets_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
+from task_paths import add_input_dir_arg, resolve_task_paths
 from maskdino import (
     COCOInstanceNewBaselineDatasetMapper,
     COCOPanopticNewBaselineDatasetMapper,
@@ -120,9 +121,7 @@ def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default="caries",
         help="caries: single_tooth instance segmentation; orth: orth_test bbox detection.",
     )
-    parser.add_argument("--data_dir", default=None, type=Path)
-    parser.add_argument("--train_json", default=None, type=Path)
-    parser.add_argument("--test_json", default=None, type=Path)
+    add_input_dir_arg(parser)
     parser.add_argument("--output_dir", default=None, type=Path)
     parser.add_argument("--wandb_name", default=None, help="Override WANDB.NAME from the config.")
     parser.add_argument("--keep_negative_ratio", default=None, type=float)
@@ -137,19 +136,14 @@ def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 def apply_default_paths(args) -> None:
     config_file = getattr(args, "config_file", None)
+    resolve_task_paths(args)
     if args.task == "caries":
         if not config_file:
             args.config_file = "configs/default_maskdino_caries_config.yaml"
-        args.data_dir = args.data_dir or Path(".datasets/intraoral_anno/single_ch_0225/single_tooth")
-        args.train_json = args.train_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_train.json")
-        args.test_json = args.test_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_test.json")
         args.output_dir = args.output_dir or Path("output/maskdino_caries")
     else:
         if not config_file:
             args.config_file = "configs/default_maskdino_orth_config.yaml"
-        args.data_dir = args.data_dir or Path(".datasets/intraoral_anno/orth_test/orth_test")
-        args.train_json = args.train_json or Path(".datasets/intraoral_anno/orth_test/orth_detection_train.json")
-        args.test_json = args.test_json or Path(".datasets/intraoral_anno/orth_test/orth_detection_test.json")
         args.output_dir = args.output_dir or Path("output/maskdino_orth")
 
 

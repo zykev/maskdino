@@ -32,6 +32,7 @@ import detectron2.utils.comm as comm
 import torch.nn.functional as F
 
 from datasets_coco.datasets_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
+from task_paths import add_input_dir_arg, resolve_task_paths
 
 try:
     from tqdm.auto import tqdm
@@ -86,9 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_machines", type=int, default=1)
     parser.add_argument("--machine_rank", type=int, default=0)
     parser.add_argument("--dist_url", default=None)
-    parser.add_argument("--data_dir", default=None, type=Path)
-    parser.add_argument("--train_json", default=None, type=Path)
-    parser.add_argument("--test_json", default=None, type=Path)
+    add_input_dir_arg(parser)
     parser.add_argument("--output_dir", default=None, type=Path)
     parser.add_argument("--wandb_name", default=None, help="Override WANDB.NAME from the config.")
     parser.add_argument("--weights", default="", help="Optional checkpoint for resume/eval.")
@@ -117,17 +116,12 @@ def parse_args() -> argparse.Namespace:
 
 def default_paths(args: argparse.Namespace) -> argparse.Namespace:
     config_file = getattr(args, "config_file", None)
+    resolve_task_paths(args)
     if args.task == "caries":
         args.config_file = config_file or Path("configs/default_maskrcnn_caries_config.yaml")
-        args.data_dir = args.data_dir or Path(".")
-        args.train_json = args.train_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_train.json")
-        args.test_json = args.test_json or Path(".datasets/intraoral_anno/single_ch_0225/caries_sample_dataset_test.json")
         args.output_dir = args.output_dir or Path("output/maskrcnn_caries")
     else:
         args.config_file = config_file or Path("configs/default_maskrcnn_orth_config.yaml")
-        args.data_dir = args.data_dir or Path(".datasets/intraoral_anno/orth_test/orth_test")
-        args.train_json = args.train_json or Path(".datasets/intraoral_anno/orth_test/orth_detection_train.json")
-        args.test_json = args.test_json or Path(".datasets/intraoral_anno/orth_test/orth_detection_test.json")
         args.output_dir = args.output_dir or Path("output/maskrcnn_orth")
     return args
 

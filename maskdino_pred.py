@@ -19,6 +19,7 @@ from detectron2.structures import Boxes, pairwise_iou
 from detectron2.utils.logger import setup_logger
 
 from maskdino import add_maskdino_config
+from task_paths import add_input_dir_arg
 from maskdino_unify import (
     apply_default_paths,
     load_categories,
@@ -48,9 +49,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Training config. Defaults to config.yaml beside the checkpoint when available.",
     )
-    parser.add_argument("--data_dir", default=None, type=Path)
-    parser.add_argument("--train_json", default=None, type=Path)
-    parser.add_argument("--test_json", default=None, type=Path)
+    add_input_dir_arg(parser)
     parser.add_argument("--weights", default="", help="Checkpoint path. Defaults to output_dir/model_final.pth.")
     parser.add_argument("--output_dir", default=None, type=Path)
     parser.add_argument(
@@ -146,6 +145,12 @@ def run_coco_eval(
     evaluator = COCOEvaluator(dataset_name, tasks=tasks, output_dir=evaluator_output_dir)
     val_loader = build_detection_test_loader(cfg, dataset_name)
     results = inference_on_dataset(predictor.model, val_loader, evaluator)
+    if not save_raw_predictions:
+        inference_dir = output_dir / "inference"
+        for filename in ("coco_instances_results.json", "instances_predictions.pth"):
+            artifact_path = inference_dir / filename
+            if artifact_path.exists():
+                artifact_path.unlink()
     print(results)
     return results
 
