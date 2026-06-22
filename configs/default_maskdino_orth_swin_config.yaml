@@ -73,12 +73,16 @@ MODEL:
 
 INPUT:
   DATASET_MAPPER_NAME: "coco_instance_detr"
+  # Match Mask R-CNN orth input resolution for fair comparison.
+  # Geometry stats support MIN_SIZE_TEST=800: resized bbox sqrt-area p10/p50/p90
+  # is about 176/264/375 px, preserving enough detail for the observed boxes.
   MIN_SIZE_TRAIN:
-  - 512
   - 640
-  MAX_SIZE_TRAIN: 960
-  MIN_SIZE_TEST: 640
-  MAX_SIZE_TEST: 960
+  - 800
+  - 1024
+  MAX_SIZE_TRAIN: 1333
+  MIN_SIZE_TEST: 800
+  MAX_SIZE_TEST: 1333
   MASK_FORMAT: polygon
 
 DATALOADER:

@@ -7,14 +7,18 @@ MODEL:
     BATCH_SIZE_PER_IMAGE: 512
     SCORE_THRESH_TEST: 0.05
   ANCHOR_GENERATOR:
+    # Orth boxes are large after resizing: with MIN_SIZE_TEST=800,
+    # bbox sqrt-area percentiles are roughly p10=176, p50=264, p90=375.
     SIZES:
-    - - 16
-      - 32
-      - 64
-      - 128
+    - - 128
+      - 192
       - 256
+      - 384
 
 INPUT:
+  # Keep orth input resolution aligned with MaskDINO configs for model comparison.
+  # Geometry stats: original short side median is ~1990 px; resizing to 800 keeps
+  # most boxes in a 192/256/384 anchor-friendly range without excessive memory.
   MIN_SIZE_TRAIN:
   - 640
   - 800
