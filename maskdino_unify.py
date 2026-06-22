@@ -358,20 +358,57 @@ class LossEvalHook(hooks.HookBase):
         self._data_loader = data_loader
 
     def _do_loss_eval(self) -> None:
+        if comm.get_world_size() > 1:
+            comm.synchronize()
+
+        model = (
+            self._model.module
+            if isinstance(self._model, torch.nn.parallel.DistributedDataParallel)
+            else self._model
+        )
+        was_training = model.training
+        model.train()
         total: Dict[str, float] = {}
         count = 0
-        for inputs in self._data_loader:
-            with torch.no_grad():
-                loss_dict = self._model(inputs)
-            for key, value in loss_dict.items():
-                total[key] = total.get(key, 0.0) + value.item()
-            count += 1
-        # Aggregate per-worker sums with a single collective to avoid deadlocks on uneven shards.
-        all_total = comm.all_gather(total)
-        count_sum = sum(comm.all_gather(count))
+        try:
+            for inputs in self._data_loader:
+                with torch.no_grad():
+                    loss_dict = model(inputs)
+                if not isinstance(loss_dict, dict):
+                    raise TypeError(
+                        "LossEvalHook expected the model to return a loss dict. "
+                        f"Got {type(loss_dict).__name__} instead."
+                    )
+                for key, value in loss_dict.items():
+                    total[key] = total.get(key, 0.0) + float(value.detach().item())
+                count += 1
+        finally:
+            model.train(was_training)
+
+        keys = sorted(total)
+        if comm.get_world_size() > 1:
+            all_keys = comm.all_gather(keys)
+            keys = sorted(set().union(*all_keys))
+
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        stats = torch.tensor(
+            [total.get(key, 0.0) for key in keys] + [float(count)],
+            dtype=torch.float64,
+            device=device,
+        )
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
+
+        count_sum = float(stats[-1].item())
         if count_sum and comm.is_main_process():
-            keys = set().union(*[part.keys() for part in all_total])
-            means = {f"val/{key}": sum(part.get(key, 0.0) for part in all_total) / count_sum for key in keys}
+            means = {
+                f"val/{key}": float(stats[index].item() / count_sum)
+                for index, key in enumerate(keys)
+            }
             means["val/total_loss"] = sum(means.values())
             self.trainer.storage.put_scalars(**means, smoothing_hint=False)
 
