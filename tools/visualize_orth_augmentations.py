@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Create per-sample montages for individual orth augmentation strategies."""
+"""Create per-sample montages for individual orth augmentation strategies.
+
+Expects the orth raw-data layout used by datasets_coco/orth_to_coco.py:
+
+    <data_dir>/<sample_id>/images/{D,F,L,R,U}.jpg
+    <data_dir>/<sample_id>/anno/{D,F,L,R,U}.json
+"""
 
 from __future__ import annotations
 
@@ -64,7 +70,10 @@ def normalize_box(points: Iterable[Iterable[float]]) -> tuple[float, float, floa
 
 def find_view_images(sample_dir: Path) -> dict[str, Path]:
     images: dict[str, Path] = {}
-    for path in sample_dir.iterdir():
+    images_dir = sample_dir / "images"
+    if not images_dir.is_dir():
+        return images
+    for path in images_dir.iterdir():
         if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
             view = path.stem.strip().upper()
             if view in DEFAULT_VIEWS:
@@ -102,8 +111,13 @@ def choose_samples(
     return random.Random(seed).sample(candidates, 2)
 
 
+def json_path_for_image(image_path: Path) -> Path:
+    """Mirror <sample_id>/images/<view>.ext to <sample_id>/anno/<view>.json."""
+    return image_path.parents[1] / "anno" / f"{image_path.stem}.json"
+
+
 def load_boxes(image_path: Path) -> np.ndarray:
-    json_path = image_path.with_suffix(".json")
+    json_path = json_path_for_image(image_path)
     if not json_path.exists():
         return np.zeros((0, 4), dtype=np.float32)
 
