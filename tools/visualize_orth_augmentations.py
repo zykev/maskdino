@@ -21,6 +21,12 @@ from detectron2.data import transforms as T
 from fvcore.transforms.transform import Transform
 from PIL import Image, ImageDraw, ImageFont
 
+# fmt: off
+import os
+import sys
+sys.path.insert(1, os.path.join(sys.path[0], '..'))
+# fmt: on
+
 from datasets_coco.orth_augmentations import representative_augmentation_transforms
 
 
