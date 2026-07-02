@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Build tooth_mask and tooth_outline guidance images for the orth_test dataset.
+"""Build tooth_mask and tooth_outline guidance images for the orth dataset.
 
-Reorganizes each `<sample_id>/` folder from:
-    D.jpg F.jpg L.jpg R.jpg U.jpg [R.json ...]
-into:
-    images/{D,F,L,R,U}.png        original photos, converted to png
+Expects each `<sample_id>/` folder already split as:
+    images/{D,F,L,R,U}.<ext>      original photos (any image extension)
     anno/*.json                   original LabelMe annotations
+
+and adds, alongside images/:
     tooth_mask/{D,F,L,R,U}.png    original photo, non-tooth pixels blacked out
     tooth_outline/{D,F,L,R,U}.png black background, white per-tooth contour lines
 
@@ -15,7 +15,6 @@ segmentation) pipeline used in tmp_prompt.py.
 """
 
 import argparse
-import shutil
 from pathlib import Path
 
 import cv2
@@ -133,15 +132,15 @@ def main():
 
     for sample_dir in tqdm(sample_dirs, desc="samples"):
         images_dir = sample_dir / "images"
-        anno_dir = sample_dir / "anno"
         mask_dir = sample_dir / "tooth_mask"
         outline_dir = sample_dir / "tooth_outline"
 
         for stem, view in VIEW_MAPPING.items():
             out_name = f"{stem}.png"
-            if (images_dir / out_name).exists():
+            if (mask_dir / out_name).exists() and (outline_dir / out_name).exists():
                 continue
-            src_path = next((p for p in sample_dir.glob(f"{stem}.*") if p.suffix.lower() in IMAGE_EXTS), None)
+
+            src_path = next((p for p in images_dir.glob(f"{stem}.*") if p.suffix.lower() in IMAGE_EXTS), None)
             if src_path is None:
                 continue
 
@@ -149,20 +148,12 @@ def main():
             yolo = yolos["right"] if view == "left" else yolos[view]
             mask = detect_tooth_mask(image, view, sam, yolo, args)
 
-            for d in (images_dir, mask_dir, outline_dir):
+            for d in (mask_dir, outline_dir):
                 d.mkdir(parents=True, exist_ok=True)
 
             tooth_mask_img = cv2.bitwise_and(image, image, mask=(mask > 0).astype(np.uint8) * 255)
             cv2.imwrite(str(mask_dir / out_name), tooth_mask_img)
             cv2.imwrite(str(outline_dir / out_name), build_outline(mask, image.shape, args.outline_thickness))
-            cv2.imwrite(str(images_dir / out_name), image)
-            src_path.unlink()
-
-        json_paths = list(sample_dir.glob("*.json"))
-        if json_paths:
-            anno_dir.mkdir(parents=True, exist_ok=True)
-            for json_path in json_paths:
-                shutil.move(str(json_path), str(anno_dir / json_path.name))
 
 
 if __name__ == "__main__":
