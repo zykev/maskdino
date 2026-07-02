@@ -283,6 +283,20 @@ def register_task_datasets(args, class_names: list[str]) -> None:
         )
 
 
+def validate_distributed_batch_size(cfg) -> None:
+    world_size = comm.get_world_size()
+    ims_per_batch = int(cfg.SOLVER.IMS_PER_BATCH)
+    if world_size <= 1:
+        return
+    if ims_per_batch < world_size or ims_per_batch % world_size != 0:
+        raise ValueError(
+            "SOLVER.IMS_PER_BATCH is the global batch size and must be at least "
+            f"the distributed world size and divisible by it. Got "
+            f"SOLVER.IMS_PER_BATCH={ims_per_batch}, world_size={world_size}. "
+            f"Use e.g. SOLVER.IMS_PER_BATCH {world_size} for per-GPU batch size 1."
+        )
+
+
 class ConciseMetricPrinter(EventWriter):
     """Print a compact training summary instead of every auxiliary loss."""
 
@@ -367,7 +381,11 @@ class LossEvalHook(hooks.HookBase):
             else self._model
         )
         was_training = model.training
+        criterion = getattr(model, "criterion", None)
+        sync_num_masks = getattr(criterion, "sync_num_masks", None)
         model.train()
+        if criterion is not None and sync_num_masks is not None:
+            criterion.sync_num_masks = False
         total: Dict[str, float] = {}
         count = 0
         try:
@@ -383,6 +401,8 @@ class LossEvalHook(hooks.HookBase):
                     total[key] = total.get(key, 0.0) + float(value.detach().item())
                 count += 1
         finally:
+            if criterion is not None and sync_num_masks is not None:
+                criterion.sync_num_masks = sync_num_masks
             model.train(was_training)
 
         keys = sorted(total)
@@ -909,6 +929,7 @@ def setup(args):
         )
 
     register_task_datasets(args, class_names)
+    validate_distributed_batch_size(cfg)
 
     cfg.freeze()
     if comm.is_main_process():

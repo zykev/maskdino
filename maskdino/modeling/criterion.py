@@ -183,6 +183,7 @@ class SetCriterion(nn.Module):
         self.focal_alpha = 0.25
         self.focal_gamma = focal_gamma
         self.negative_weight = negative_weight
+        self.sync_num_masks = True
 
         self.panoptic_on = panoptic_on
         self.semantic_ce_loss = semantic_ce_loss
@@ -376,7 +377,7 @@ class SetCriterion(nn.Module):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
 
         # Retrieve the matching between the outputs of the last layer and the targets
-        if self.dn is not "no" and mask_dict is not None:
+        if self.dn != "no" and mask_dict is not None:
             output_known_lbs_bboxes,num_tgt,single_pad,scalar = self.prep_for_dn(mask_dict)
             exc_idx = []
             for i in range(len(targets)):
@@ -395,9 +396,10 @@ class SetCriterion(nn.Module):
         num_masks = torch.as_tensor(
             [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
         )
-        if is_dist_avail_and_initialized():
+        if self.sync_num_masks and is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_masks)
-        num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
+            num_masks = num_masks / get_world_size()
+        num_masks = torch.clamp(num_masks, min=1).item()
 
         # Compute all the requested losses
         losses = {}
