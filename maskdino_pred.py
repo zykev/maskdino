@@ -24,7 +24,7 @@ from maskdino_unify import (
     apply_default_paths,
     load_categories,
     MaskDINOPredictor,
-    register_task_datasets,
+    register_datasets,
 )
 from maskrcnn_unify import (
     add_panel_title,
@@ -378,7 +378,7 @@ def main() -> None:
     print(f"Using inference config: {args.config_file}")
     class_names = load_categories(args.train_json, args.task)
     cfg = build_cfg(args, len(class_names))
-    register_task_datasets(args, class_names)
+    register_datasets(args, class_names, include_masks=args.task == "caries")
     inspect_category_consistency(args.train_json, args.test_json)
     predictor = MaskDINOPredictor(cfg)
 

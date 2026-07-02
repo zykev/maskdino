@@ -1,9 +1,9 @@
 MODEL:
   WEIGHTS: detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl
-  MASK_ON: false
+  # SCORE_THRESH_TEST only filters which predictions are kept at inference time.
+  # COCOEvaluator always scores AP at the fixed COCO IoU grid (0.50:0.05:0.95),
+  # independent of any threshold here.
   ROI_HEADS:
-    # maskrcnn_unified.py overwrites NUM_CLASSES from the orth COCO train JSON.
-    NUM_CLASSES: 1
     BATCH_SIZE_PER_IMAGE: 512
     SCORE_THRESH_TEST: 0.05
   ANCHOR_GENERATOR:
@@ -29,22 +29,45 @@ INPUT:
 
 DATALOADER:
   NUM_WORKERS: 4
-  FILTER_EMPTY_ANNOTATIONS: false
   SAMPLER_TRAIN: RepeatFactorTrainingSampler
   REPEAT_THRESHOLD: 0.05
   KEEP_NEGATIVE_RATIO: 0.2
 
 ORTH_CLASS_BALANCE:
   ENABLED: true
-  BETA: 0.999
+  BETA: 0.99
   CLIP_MIN: 0.25
-  CLIP_MAX: 5.0
+  CLIP_MAX: 2.0
   LOSS_TYPE: weighted_ce
   FOCAL_GAMMA: 2.0
   BACKGROUND_WEIGHT: 1.0
 
+ORTH_AUGMENTATION:
+  ENABLED: true
+  HORIZONTAL_FLIP_PROB: 0.5
+  ROTATION_PROB: 0.3
+  ROTATION_ANGLE: 7.0
+  COLOR_PROB: 0.2
+  BRIGHTNESS_MIN: 0.85
+  BRIGHTNESS_MAX: 1.15
+  CONTRAST_MIN: 0.90
+  CONTRAST_MAX: 1.10
+  SATURATION_MIN: 0.90
+  SATURATION_MAX: 1.10
+  GAMMA_PROB: 0.2
+  GAMMA_MIN: 0.90
+  GAMMA_MAX: 1.10
+  QUALITY_PROB: 0.2
+  BLUR_SIGMA_MIN: 0.10
+  BLUR_SIGMA_MAX: 0.80
+  JPEG_QUALITY_MIN: 75
+  JPEG_QUALITY_MAX: 100
+
+DISTRIBUTED:
+  NUM_GPUS: 2
+  IMS_PER_GPU: 1
+
 SOLVER:
-  IMS_PER_BATCH: 2
   BASE_LR: 0.0025
   MAX_ITER: 12000
   STEPS:

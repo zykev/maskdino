@@ -1,35 +1,17 @@
 _BASE_: coco/instance-segmentation/Base-COCO-InstanceSegmentation.yaml
+
 MODEL:
   META_ARCHITECTURE: "MaskDINO"
-  BACKBONE:
-    NAME: "D2SwinTransformer"
-  SWIN:
-    EMBED_DIM: 96
-    DEPTHS: [2, 2, 6, 2]
-    NUM_HEADS: [3, 6, 12, 24]
-    WINDOW_SIZE: 7
-    APE: False
-    DROP_PATH_RATE: 0.2
-    PATCH_NORM: True
-    PRETRAIN_IMG_SIZE: 224
-  # Set this to a standard Swin-T checkpoint, or pass MODEL.WEIGHTS on the
-  # command line. For a Swin-MAE checkpoint, use the swin_mae config instead.
-  WEIGHTS: /home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth
-  PIXEL_MEAN: [123.675, 116.280, 103.530]
-  PIXEL_STD: [58.395, 57.120, 57.375]
   SEM_SEG_HEAD:
     NAME: "MaskDINOHead"
     IGNORE_VALUE: 255
-    # maskdino_unify.py overwrites NUM_CLASSES from the orth train COCO JSON.
-    NUM_CLASSES: 1
     LOSS_WEIGHT: 1.0
     CONVS_DIM: 256
     MASK_DIM: 256
     NORM: "GN"
     PIXEL_DECODER_NAME: "MaskDINOEncoder"
     DIM_FEEDFORWARD: 1024
-    NUM_FEATURE_LEVELS: 4
-    TOTAL_NUM_FEATURE_LEVELS: 5
+    TOTAL_NUM_FEATURE_LEVELS: 3
     IN_FEATURES: ["res2", "res3", "res4", "res5"]
     DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES: ["res3", "res4", "res5"]
     COMMON_STRIDE: 4
@@ -38,7 +20,7 @@ MODEL:
   MaskDINO:
     TRANSFORMER_DECODER_NAME: "MaskDINODecoder"
     DEEP_SUPERVISION: True
-    NO_OBJECT_WEIGHT: 0.1
+    NO_OBJECT_WEIGHT: 1.0
     CLASS_WEIGHT: 4.0
     MASK_WEIGHT: 0.0
     DICE_WEIGHT: 0.0
@@ -51,11 +33,9 @@ MODEL:
     NHEADS: 8
     DROPOUT: 0.0
     DIM_FEEDFORWARD: 1024
-    ENC_LAYERS: 0
-    PRE_NORM: False
     ENFORCE_INPUT_PROJ: False
     SIZE_DIVISIBILITY: 32
-    DEC_LAYERS: 4
+    DEC_LAYERS: 6
     TRAIN_NUM_POINTS: 12544
     OVERSAMPLE_RATIO: 3.0
     IMPORTANCE_SAMPLE_RATIO: 0.75
@@ -63,19 +43,15 @@ MODEL:
     TWO_STAGE: True
     DN: "standard"
     DN_NUM: 50
-    INITIALIZE_BOX_TYPE: "mask2box"
+    INITIALIZE_BOX_TYPE: "bitmask"
     TEST:
       SEMANTIC_ON: False
       INSTANCE_ON: True
       PANOPTIC_ON: False
-      OVERLAP_THRESHOLD: 0.8
-      OBJECT_MASK_THRESHOLD: 0.5
 
 INPUT:
   DATASET_MAPPER_NAME: "coco_instance_detr"
-  # Match Mask R-CNN orth input resolution for fair comparison.
-  # Geometry stats support MIN_SIZE_TEST=800: resized bbox sqrt-area p10/p50/p90
-  # is about 176/264/375 px, preserving enough detail for the observed boxes.
+  # Shared with Mask R-CNN so comparisons use the same image geometry.
   MIN_SIZE_TRAIN:
   - 640
   - 800
@@ -87,24 +63,44 @@ INPUT:
 
 DATALOADER:
   NUM_WORKERS: 4
-  FILTER_EMPTY_ANNOTATIONS: false
-  SAMPLER_TRAIN: RepeatFactorTrainingSampler
-  REPEAT_THRESHOLD: 0.05
+  REPEAT_THRESHOLD: 0.2
   KEEP_NEGATIVE_RATIO: 0.2
 
 ORTH_CLASS_BALANCE:
   ENABLED: true
-  BETA: 0.999
+  BETA: 0.99
   CLIP_MIN: 0.25
-  CLIP_MAX: 5.0
-  LOSS_TYPE: positive_focal
+  CLIP_MAX: 2.0
   FOCAL_GAMMA: 2.0
-  BACKGROUND_WEIGHT: 1.0
+
+ORTH_AUGMENTATION:
+  ENABLED: true
+  HORIZONTAL_FLIP_PROB: 0.5
+  ROTATION_PROB: 0.3
+  ROTATION_ANGLE: 7.0
+  COLOR_PROB: 0.2
+  BRIGHTNESS_MIN: 0.85
+  BRIGHTNESS_MAX: 1.15
+  CONTRAST_MIN: 0.90
+  CONTRAST_MAX: 1.10
+  SATURATION_MIN: 0.90
+  SATURATION_MAX: 1.10
+  GAMMA_PROB: 0.2
+  GAMMA_MIN: 0.90
+  GAMMA_MAX: 1.10
+  QUALITY_PROB: 0.2
+  BLUR_SIGMA_MIN: 0.10
+  BLUR_SIGMA_MAX: 0.80
+  JPEG_QUALITY_MIN: 75
+  JPEG_QUALITY_MAX: 100
+
+DISTRIBUTED:
+  NUM_GPUS: 2
+  IMS_PER_GPU: 1
 
 SOLVER:
   AMP:
     ENABLED: True
-  IMS_PER_BATCH: 2
   BASE_LR: 0.00025
   MAX_ITER: 12000
   STEPS:
@@ -116,11 +112,7 @@ SOLVER:
 TEST:
   EVAL_PERIOD: 1000
 
-# Training logger: "tensorboard" or "wandb".
 LOGGER: wandb
 WANDB:
   PROJECT: maskdino
   ENTITY: "intraoral"
-  NAME: "maskdino_orth_swin"
-
-OUTPUT_DIR: output/maskdino_orth_swin

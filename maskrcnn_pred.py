@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import random
 from collections import defaultdict
 from pathlib import Path
 
@@ -19,7 +17,6 @@ from detectron2.engine import DefaultPredictor
 from detectron2.evaluation import COCOEvaluator, DatasetEvaluator, DatasetEvaluators, inference_on_dataset
 from detectron2.structures import Boxes, pairwise_iou
 from detectron2.utils.logger import setup_logger
-from detectron2.utils.visualizer import Visualizer
 
 from task_paths import add_input_dir_arg
 from maskrcnn_unify import (
@@ -27,7 +24,6 @@ from maskrcnn_unify import (
     build_cfg,
     default_paths,
     load_categories,
-    load_coco_dicts,
     register_datasets,
     safe_path_name,
     select_samples_per_class,
@@ -508,7 +504,7 @@ def main() -> None:
     cfg = build_cfg(args, len(class_names))
     cfg.MODEL.WEIGHTS = args.weights
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = args.score_thresh
-    register_datasets(args, class_names)
+    register_datasets(args, class_names, include_masks=args.task == "caries")
     inspect_category_consistency(args.train_json, args.test_json)
     inference_cfg = cfg.clone()
     inference_cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = min(

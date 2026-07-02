@@ -5,13 +5,18 @@ The input folder is expected to look like:
 
     .datasets/intraoral_anno/orth_test/
       22012/
-        D.jpg
-        R.jpg
-        R.json
+        images/
+          D.jpg
+          R.jpg
+        anno/
+          R.json
 
-JSON files are LabelMe annotations. Shapes with ``rectangle`` or ``polygon``
-points become COCO bbox annotations. Images without JSON annotations are kept as
-negative samples, which is useful for Faster R-CNN training.
+Each sample's images and annotations live in sibling ``images/`` and ``anno/``
+folders; a JSON file is paired with the image at the same relative path with
+``anno/`` swapped for ``images/``. JSON files are LabelMe annotations. Shapes
+with ``rectangle`` or ``polygon`` points become COCO bbox annotations. Images
+without a JSON annotation are kept as negative samples, which is useful for
+Faster R-CNN training.
 """
 
 from __future__ import annotations
@@ -405,25 +410,34 @@ def image_size_from_file_or_json(image_path: Path | None, data: dict | None) -> 
     raise ValueError("Cannot determine image size")
 
 
-def resolve_image_path(json_path: Path, data: dict) -> Path | None:
-    candidates: list[Path] = []
-    image_path = data.get("imagePath")
-    if image_path:
-        candidates.append(json_path.parent / str(image_path))
+def sample_key(path: Path, data_dir: Path, marker: str) -> tuple[str, ...] | None:
+    """Identify the sample a file under ``images/`` or ``anno/`` belongs to.
 
-    for suffix in IMAGE_SUFFIXES:
-        candidates.append(json_path.with_suffix(suffix))
-        candidates.append(json_path.with_suffix(suffix.upper()))
+    Drops the ``marker`` path component (``"images"`` or ``"anno"``) and the
+    file suffix, so an image and its annotation resolve to the same key, e.g.
+    ``<sample_id>/images/D.jpg`` and ``<sample_id>/anno/D.json`` both key to
+    ``(sample_id, "D")``.
+    """
+    rel_parts = list(path.relative_to(data_dir).parts)
+    if marker not in rel_parts:
+        return None
+    marker_index = len(rel_parts) - 1 - rel_parts[::-1].index(marker)
+    stem = Path(rel_parts[-1]).stem
+    key_parts = rel_parts[:marker_index] + rel_parts[marker_index + 1 : -1] + [stem]
+    return tuple(key_parts)
 
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
 
-    stem = json_path.stem.strip().lower()
-    for candidate in json_path.parent.iterdir():
-        if candidate.suffix.lower() in IMAGE_SUFFIXES and candidate.stem.strip().lower() == stem:
-            return candidate
-    return None
+def image_path_for_json(json_path: Path, data_dir: Path) -> Path:
+    """Mirror an ``anno/...json`` path into its ``images/....jpg`` counterpart.
+
+    Callers must only pass a `json_path` for which `sample_key(json_path,
+    data_dir, "anno")` is not None, i.e. one that has "anno" as a path
+    component; otherwise `.index("anno")` raises ValueError.
+    """
+    rel_parts = list(json_path.relative_to(data_dir).parts)
+    marker_index = len(rel_parts) - 1 - rel_parts[::-1].index("anno")
+    rel_parts[marker_index] = "images"
+    return (data_dir / Path(*rel_parts)).with_suffix(".jpg")
 
 
 def normalize_box(points: Iterable[Iterable[float]]) -> tuple[float, float, float, float]:
@@ -462,28 +476,32 @@ def infer_labels(data_dir: Path) -> list[str]:
     return sorted(labels, key=natural_key)
 
 
-def collect_image_records(data_dir: Path) -> dict[Path, dict]:
-    records: dict[Path, dict] = {}
+def collect_image_records(data_dir: Path) -> dict[tuple[str, ...], dict]:
+    records: dict[tuple[str, ...], dict] = {}
 
     for image_path in sorted(data_dir.rglob("*")):
-        if image_path.is_file() and image_path.suffix.lower() in IMAGE_SUFFIXES:
-            records[image_path.resolve()] = {"image_path": image_path, "json_path": None, "data": None}
+        if not (image_path.is_file() and image_path.suffix.lower() in IMAGE_SUFFIXES):
+            continue
+        key = sample_key(image_path, data_dir, "images")
+        if key is None:
+            continue
+        records.setdefault(key, {"image_path": None, "json_path": None, "data": None})
+        records[key]["image_path"] = image_path
 
     for json_path in sorted(data_dir.rglob("*.json")):
+        key = sample_key(json_path, data_dir, "anno")
+        if key is None:
+            continue
         data = load_json(json_path)
         if {"images", "annotations", "categories"}.issubset(data):
             continue
-        if not any(key in data for key in ("shapes", "imagePath", "imageData", "imageWidth")):
+        if not any(field in data for field in ("shapes", "imagePath", "imageData", "imageWidth")):
             continue
-        image_path = resolve_image_path(json_path, data)
-        if image_path is None:
-            key = json_path.resolve()
-            records[key] = {"image_path": None, "json_path": json_path, "data": data}
-        else:
-            key = image_path.resolve()
-            records[key] = {"image_path": image_path, "json_path": json_path, "data": data}
+        record = records.setdefault(key, {"image_path": None, "json_path": None, "data": None})
+        record["json_path"] = json_path
+        record["data"] = data
 
-    return records
+    return dict(sorted(records.items()))
 
 
 def convert_to_coco(
@@ -578,7 +596,7 @@ def convert_to_coco(
         if image_path:
             file_name = image_path.resolve().relative_to(data_dir).as_posix()
         elif json_path:
-            file_name = json_path.resolve().relative_to(data_dir).with_suffix(".jpg").as_posix()
+            file_name = image_path_for_json(json_path, data_dir).relative_to(data_dir).as_posix()
         else:
             raise ValueError("Record has neither image nor JSON path")
 

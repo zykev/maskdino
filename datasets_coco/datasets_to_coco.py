@@ -64,35 +64,39 @@ def convert_to_coco(root_dir, output_file):
     annotation_id_counter = 1
     
     # 遍历文件夹结构
-    # 结构: root -> sample_id -> view (D,F,L,R,U) -> files
+    # 结构: root -> sample_id -> images|anno -> view (D,F,L,R,U) -> files
     for sample_id in os.listdir(root_dir):
         sample_path = os.path.join(root_dir, sample_id)
         if not os.path.isdir(sample_path):
             continue
-            
-        for view in os.listdir(sample_path):
-            view_path = os.path.join(sample_path, view)
-            if not os.path.isdir(view_path):
+
+        anno_root = os.path.join(sample_path, "anno")
+        images_root = os.path.join(sample_path, "images")
+        if not os.path.isdir(anno_root):
+            continue
+
+        for view in os.listdir(anno_root):
+            anno_view_path = os.path.join(anno_root, view)
+            if not os.path.isdir(anno_view_path):
                 continue
-            
-            # 遍历该视角下的所有文件
-            files = os.listdir(view_path)
-            # 找到所有的 json 文件
-            json_files = [f for f in files if f.endswith('.json')]
-            
+            images_view_path = os.path.join(images_root, view)
+
+            # 找到该视角标注目录下的所有 json 文件
+            json_files = [f for f in os.listdir(anno_view_path) if f.endswith('.json')]
+
             for json_file in json_files:
-                json_path = os.path.join(view_path, json_file)
-                
-                # 对应的图片文件名 (假设是同名 .png)
+                json_path = os.path.join(anno_view_path, json_file)
+
+                # 对应的图片文件名 (假设是同名 .png)，位于镜像的 images/<view> 目录下
                 image_filename = json_file.replace('.json', '.png')
-                image_path = os.path.join(view_path, image_filename)
-                
+                image_path = os.path.join(images_view_path, image_filename)
+
                 if not os.path.exists(image_path):
                     print(f"Warning: Image not found for {json_path}, skipping.")
                     continue
-                
+
                 # 1. 读取图片获取宽高
-                rel_path = os.path.join(ROOT_DIR, sample_id, view, image_filename).replace("\\", "/")
+                rel_path = os.path.join(ROOT_DIR, sample_id, "images", view, image_filename).replace("\\", "/")
                 
                 img = cv2.imread(image_path)
                 if img is None:

@@ -1,12 +1,13 @@
 MODEL:
   WEIGHTS: detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl
-  MASK_ON: true
+  # ROI_HEADS/RPN IOU_THRESHOLDS below only control which proposals count as
+  # positive/negative training samples. COCOEvaluator always scores AP at the
+  # fixed COCO IoU grid (0.50:0.05:0.95); changing these values does not
+  # change how AP is computed.
   ROI_HEADS:
-    # maskrcnn_unified.py overwrites NUM_CLASSES from datasets_coco/datasets_to_coco.py.
-    NUM_CLASSES: 1
     BATCH_SIZE_PER_IMAGE: 256
     POSITIVE_FRACTION: 0.5
-    SCORE_THRESH_TEST: 0.5
+    SCORE_THRESH_TEST: 0.05
     IOU_THRESHOLDS:
     - 0.3
     - 0.45
@@ -38,13 +39,15 @@ INPUT:
 
 DATALOADER:
   NUM_WORKERS: 4
-  FILTER_EMPTY_ANNOTATIONS: false
   SAMPLER_TRAIN: RepeatFactorTrainingSampler
   REPEAT_THRESHOLD: 0.1
   KEEP_NEGATIVE_RATIO: 0.1
 
+DISTRIBUTED:
+  NUM_GPUS: 1
+  IMS_PER_GPU: 4
+
 SOLVER:
-  IMS_PER_BATCH: 4
   BASE_LR: 0.005
   MAX_ITER: 20000
   STEPS:

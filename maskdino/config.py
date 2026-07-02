@@ -4,6 +4,8 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 from detectron2.config import CfgNode as CN
+from datasets_coco.class_balance import add_class_balance_config
+from datasets_coco.orth_augmentations import add_orth_augmentation_config
 
 
 def add_maskdino_config(cfg):
@@ -78,6 +80,7 @@ def add_maskdino_config(cfg):
     cfg.MODEL.SEM_SEG_HEAD.DEFORMABLE_TRANSFORMER_ENCODER_N_POINTS = 4
     cfg.MODEL.SEM_SEG_HEAD.DEFORMABLE_TRANSFORMER_ENCODER_N_HEADS = 8
     cfg.MODEL.SEM_SEG_HEAD.DIM_FEEDFORWARD = 1024
+    # Compatibility only for upstream YAMLs; MaskDINO uses TOTAL_NUM_FEATURE_LEVELS.
     cfg.MODEL.SEM_SEG_HEAD.NUM_FEATURE_LEVELS = 3
     cfg.MODEL.SEM_SEG_HEAD.TOTAL_NUM_FEATURE_LEVELS = 4
     cfg.MODEL.SEM_SEG_HEAD.FEATURE_ORDER = 'high2low'  # ['low2high', 'high2low'] high2low: from high level to low level
@@ -145,16 +148,9 @@ def add_maskdino_config(cfg):
     cfg.MODEL.SWIN.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
     cfg.MODEL.SWIN.USE_CHECKPOINT = False
 
-    # Orthodontic detection class-balance options. These are consumed by the
-    # unified orth runner and left disabled by default for other tasks.
-    cfg.ORTH_CLASS_BALANCE = CN()
-    cfg.ORTH_CLASS_BALANCE.ENABLED = False
-    cfg.ORTH_CLASS_BALANCE.BETA = 0.999
-    cfg.ORTH_CLASS_BALANCE.CLIP_MIN = 0.25
-    cfg.ORTH_CLASS_BALANCE.CLIP_MAX = 5.0
-    cfg.ORTH_CLASS_BALANCE.LOSS_TYPE = "positive_focal"
-    cfg.ORTH_CLASS_BALANCE.FOCAL_GAMMA = 2.0
-    cfg.ORTH_CLASS_BALANCE.BACKGROUND_WEIGHT = 1.0
-    cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS = []
+    add_orth_augmentation_config(cfg)
 
-    cfg.Default_loading=True  # a bug in my d2. resume use this; if first time ResNet load, set it false
+    # Orthodontic detection class-balance options, left disabled by default
+    # for other tasks. Only ENABLED/BETA/CLIP_MIN/CLIP_MAX/FOCAL_GAMMA/
+    # CLASS_WEIGHTS affect MaskDINO training; see add_class_balance_config.
+    add_class_balance_config(cfg)

@@ -207,7 +207,6 @@ class MaskDINOEncoder(nn.Module):
         # deformable transformer encoder args
         transformer_in_features: List[str],
         common_stride: int,
-        num_feature_levels: int,
         total_num_feature_levels: int,
         feature_order: str,
     ):
@@ -222,8 +221,7 @@ class MaskDINOEncoder(nn.Module):
             conv_dims: number of output channels for the intermediate conv layers.
             mask_dim: number of output channels for the final conv layer.
             norm (str or callable): normalization for all conv layers
-            num_feature_levels: feature scales used
-            total_num_feature_levels: total feautre scales used (include the downsampled features)
+            total_num_feature_levels: total feature scales used (including downsampled features)
             feature_order: 'low2high' or 'high2low', i.e., 'low2high' means low-resolution features are put in the first.
         """
         super().__init__()
@@ -245,7 +243,6 @@ class MaskDINOEncoder(nn.Module):
         transformer_in_channels = [v.channels for k, v in transformer_input_shape]
         self.transformer_feature_strides = [v.stride for k, v in transformer_input_shape]  # to decide extra FPN layers
 
-        self.maskdino_num_feature_levels = num_feature_levels  # always use 3 scales
         self.total_num_feature_levels = total_num_feature_levels
         self.common_stride = common_stride
 
@@ -355,7 +352,6 @@ class MaskDINOEncoder(nn.Module):
         ret["transformer_in_features"] = cfg.MODEL.SEM_SEG_HEAD.DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES  # ['res3', 'res4', 'res5']
         ret["common_stride"] = cfg.MODEL.SEM_SEG_HEAD.COMMON_STRIDE
         ret["total_num_feature_levels"] = cfg.MODEL.SEM_SEG_HEAD.TOTAL_NUM_FEATURE_LEVELS
-        ret["num_feature_levels"] = cfg.MODEL.SEM_SEG_HEAD.NUM_FEATURE_LEVELS
         ret["feature_order"] = cfg.MODEL.SEM_SEG_HEAD.FEATURE_ORDER
         return ret
 

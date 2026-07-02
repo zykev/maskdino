@@ -6,14 +6,11 @@ from __future__ import annotations
 import argparse
 import copy
 import itertools
-import json
 import logging
 import os
-import random
 import types
 import warnings
 import weakref
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
@@ -25,7 +22,7 @@ import torch
 # argparse.Namespace stored in our trusted Swin-MAE pretrain checkpoints.
 torch.serialization.add_safe_globals([argparse.Namespace])
 from detectron2.checkpoint import DetectionCheckpointer
-from detectron2.config import get_cfg
+from detectron2.config import CfgNode as CN, get_cfg
 from detectron2.data import (
     DatasetCatalog,
     MetadataCatalog,
@@ -43,32 +40,46 @@ from detectron2.engine import (
     hooks,
     launch,
 )
-from detectron2.evaluation import COCOEvaluator, DatasetEvaluators, SemSegEvaluator, verify_results
+from detectron2.evaluation import COCOEvaluator, verify_results
 from detectron2.modeling import build_model
-from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
+from detectron2.projects.deeplab import add_deeplab_config
 from detectron2.solver.build import maybe_add_gradient_clipping
-from detectron2.structures import BoxMode
 from detectron2.utils.env import seed_all_rng
-from detectron2.utils.events import EventWriter, JSONWriter, TensorboardXWriter, get_event_storage
+from detectron2.utils.events import JSONWriter, TensorboardXWriter
 from detectron2.utils.logger import setup_logger
-from detectron2.utils.visualizer import Visualizer
 
-try:
-    from tqdm.auto import tqdm
-except ImportError:
-    tqdm = None
-
-from datasets_coco.datasets_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
+from datasets_coco.class_balance import compute_effective_class_weights
+from datasets_coco.orth_augmentations import build_orth_augmentations
 from task_paths import add_input_dir_arg, resolve_task_paths
 from maskdino import (
     COCOInstanceNewBaselineDatasetMapper,
     COCOPanopticNewBaselineDatasetMapper,
     DetrDatasetMapper,
     MaskFormerSemanticDatasetMapper,
-    SemanticSegmentorWithTTA,
     add_maskdino_config,
 )
 from maskdino.utils import box_ops
+from unify_common import (
+    ConciseMetricPrinter,
+    LossEvalHook,
+    PointerFreeDetectionCheckpointer,
+    TqdmHook,
+    WandbWriter,
+    add_panel_title,
+    configure_distributed_solver,
+    count_visible_gpus,
+    draw_gt_panel,
+    draw_pred_panel,
+    load_categories,
+    load_coco_dicts,
+    register_datasets,
+    safe_path_name,
+    select_samples_per_class,
+    validate_distributed_launch,
+)
+
+# Existing solver schedules and learning rates were tuned with global batch size 2.
+REFERENCE_GLOBAL_BATCH = 2
 
 warnings.filterwarnings(
     "ignore",
@@ -87,30 +98,8 @@ warnings.filterwarnings(
 )
 
 
-class PointerFreeDetectionCheckpointer(DetectionCheckpointer):
-    """Resume from the newest checkpoint without writing last_checkpoint."""
-
-    def tag_last_checkpoint(self, last_filename_basename: str) -> None:
-        return
-
-    def _latest_checkpoint(self) -> str:
-        if not self.save_dir:
-            return ""
-        checkpoints = list(Path(self.save_dir).glob("model_*.pth"))
-        if not checkpoints:
-            return ""
-        return str(max(checkpoints, key=lambda path: path.stat().st_mtime))
-
-    def has_checkpoint(self) -> bool:
-        return bool(self._latest_checkpoint())
-
-    def get_checkpoint_file(self) -> str:
-        return self._latest_checkpoint()
-
-
 def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--config_file", dest="config_file", default=argparse.SUPPRESS)
-    parser.add_argument("--num_gpus", dest="num_gpus", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--num_machines", dest="num_machines", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--machine_rank", dest="machine_rank", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--dist_url", dest="dist_url", default=argparse.SUPPRESS)
@@ -126,6 +115,14 @@ def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--wandb_name", default=None, help="Override WANDB.NAME from the config.")
     parser.add_argument("--keep_negative_ratio", default=None, type=float)
     parser.add_argument("--repeat_threshold", default=None, type=float)
+    parser.add_argument(
+        "--batch_size",
+        "--batch-size",
+        dest="batch_size",
+        default=None,
+        type=int,
+        help="Per-GPU batch size. Overrides DISTRIBUTED.IMS_PER_GPU.",
+    )
     parser.add_argument("--vis_samples", default=8, type=int, help="Maximum visualizations per GT class.")
     parser.add_argument("--vis_score_thresh", default=0.5, type=float)
     parser.add_argument("--log_period", default=100, type=int, help="Iteration interval for concise console logs.")
@@ -140,342 +137,73 @@ def apply_default_paths(args) -> None:
     if args.task == "caries":
         if not config_file:
             args.config_file = "configs/default_maskdino_caries_config.yaml"
-        args.output_dir = args.output_dir or Path("output/maskdino_caries")
     else:
         if not config_file:
-            args.config_file = "configs/default_maskdino_orth_config.yaml"
-        args.output_dir = args.output_dir or Path("output/maskdino_orth")
+            args.config_file = "configs/default_maskdino_orth_resnet_config.yaml"
 
 
-def load_categories(json_path: Path, task: str) -> list[str]:
-    if task == "caries":
-        return [item["name"] for item in sorted(CARIES_CATEGORIES_INFO, key=lambda item: item["id"])]
-    with json_path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    return [category["name"] for category in sorted(data["categories"], key=lambda item: item["id"])]
+def add_distributed_config(cfg) -> None:
+    cfg.DISTRIBUTED = CN()
+    cfg.DISTRIBUTED.NUM_GPUS = 2
+    cfg.DISTRIBUTED.IMS_PER_GPU = 1
 
 
-def compute_effective_class_weights(
-    json_path: Path,
-    num_classes: int,
-    *,
-    beta: float,
-    clip_min: float,
-    clip_max: float,
-) -> list[float]:
-    with json_path.open("r", encoding="utf-8") as f:
-        coco_data = json.load(f)
+def _build_base_cfg():
+    cfg = get_cfg()
+    add_deeplab_config(cfg)
+    add_maskdino_config(cfg)
+    add_distributed_config(cfg)
+    cfg.set_new_allowed(True)
+    return cfg
 
-    counts = np.zeros(num_classes, dtype=np.float64)
-    for ann in coco_data.get("annotations", []):
-        class_index = int(ann["category_id"]) - 1
-        if 0 <= class_index < num_classes:
-            counts[class_index] += 1.0
 
-    effective_counts = np.maximum(counts, 1.0)
-    weights = (1.0 - beta) / (1.0 - np.power(beta, effective_counts))
-    weights = np.clip(weights, clip_min, clip_max)
-    weights = weights * (num_classes / weights.sum())
-    print(
-        "Orth class-balance counts:",
-        {index: int(count) for index, count in enumerate(counts.tolist())},
+def load_launch_settings(args) -> tuple[int, int]:
+    apply_default_paths(args)
+    cfg = _build_base_cfg()
+    cfg.merge_from_file(args.config_file)
+    cfg.merge_from_list(args.opts)
+
+    visible_gpu_count = count_visible_gpus()
+    num_gpus = (
+        visible_gpu_count
+        if visible_gpu_count is not None
+        else int(cfg.DISTRIBUTED.NUM_GPUS)
     )
-    print("Orth effective-number weights:", [round(float(weight), 4) for weight in weights])
-    return [float(weight) for weight in weights]
-
-
-def resolve_image_path(data_dir: Path, file_name: str) -> str:
-    path = Path(file_name)
-    if path.is_absolute() or path.exists():
-        return str(path)
-    return str(data_dir / file_name)
-
-
-def load_coco_dicts(
-    data_dir: Path,
-    json_path: Path,
-    *,
-    task: str,
-    is_train: bool,
-    keep_negative_ratio: float,
-    seed: int,
-) -> list[dict]:
-    if not 0.0 <= keep_negative_ratio <= 1.0:
-        raise ValueError("--keep_negative_ratio must be between 0.0 and 1.0")
-
-    with json_path.open("r", encoding="utf-8") as f:
-        coco_data = json.load(f)
-
-    images = {image["id"]: image for image in coco_data["images"]}
-    annotations_by_image: dict[int, list[dict]] = {image_id: [] for image_id in images}
-    for ann in coco_data["annotations"]:
-        annotations_by_image.setdefault(ann["image_id"], []).append(ann)
-
-    rng = random.Random(seed)
-    dataset_dicts = []
-    negative_count = 0
-    kept_negative_count = 0
-
-    for image_id, image_info in images.items():
-        anns = annotations_by_image.get(image_id, [])
-        if not anns:
-            negative_count += 1
-            if is_train and rng.random() > keep_negative_ratio:
-                continue
-            kept_negative_count += 1
-
-        record = {
-            "file_name": resolve_image_path(data_dir, image_info["file_name"]),
-            "image_id": image_id,
-            "height": image_info["height"],
-            "width": image_info["width"],
-            "annotations": [],
-        }
-        for ann in anns:
-            obj = {
-                "bbox": ann["bbox"],
-                "bbox_mode": BoxMode.XYWH_ABS,
-                "category_id": ann["category_id"] - 1,
-                "iscrowd": ann.get("iscrowd", 0),
-            }
-            if task == "caries":
-                obj["segmentation"] = ann["segmentation"]
-            record["annotations"].append(obj)
-
-        dataset_dicts.append(record)
-
-    split_name = "train" if is_train else "val"
-    print(
-        f"[{task}_{split_name}] loaded {len(dataset_dicts)} images from {json_path}; "
-        f"kept {kept_negative_count}/{negative_count} empty negative samples"
+    if num_gpus < 1:
+        raise ValueError(f"DISTRIBUTED.NUM_GPUS must be positive, got {num_gpus}.")
+    ims_per_gpu = (
+        int(args.batch_size)
+        if args.batch_size is not None
+        else int(cfg.DISTRIBUTED.IMS_PER_GPU)
     )
-    return dataset_dicts
-
-
-def register_task_datasets(args, class_names: list[str]) -> None:
-    for split, json_path in {"train": args.train_json, "val": args.test_json}.items():
-        dataset_name = f"{args.task}_{split}"
-        if dataset_name in DatasetCatalog.list():
-            DatasetCatalog.remove(dataset_name)
-        if dataset_name in MetadataCatalog.list():
-            MetadataCatalog.remove(dataset_name)
-
-        is_train = split == "train"
-        DatasetCatalog.register(
-            dataset_name,
-            lambda json_path=json_path, is_train=is_train: load_coco_dicts(
-                args.data_dir,
-                json_path,
-                task=args.task,
-                is_train=is_train,
-                keep_negative_ratio=args.keep_negative_ratio,
-                seed=args.seed,
-            ),
-        )
-        MetadataCatalog.get(dataset_name).set(
-            thing_classes=class_names,
-            evaluator_type="coco",
-            json_file=str(json_path),
-            image_root=str(args.data_dir),
-            thing_dataset_id_to_contiguous_id={
-                category_id: category_id - 1 for category_id in range(1, len(class_names) + 1)
-            },
-        )
-
-
-def validate_distributed_batch_size(cfg) -> None:
-    world_size = comm.get_world_size()
-    ims_per_batch = int(cfg.SOLVER.IMS_PER_BATCH)
-    if world_size <= 1:
-        return
-    if ims_per_batch < world_size or ims_per_batch % world_size != 0:
+    if ims_per_gpu < 1:
         raise ValueError(
-            "SOLVER.IMS_PER_BATCH is the global batch size and must be at least "
-            f"the distributed world size and divisible by it. Got "
-            f"SOLVER.IMS_PER_BATCH={ims_per_batch}, world_size={world_size}. "
-            f"Use e.g. SOLVER.IMS_PER_BATCH {world_size} for per-GPU batch size 1."
+            f"DISTRIBUTED.IMS_PER_GPU must be positive, got {ims_per_gpu}."
         )
+    return num_gpus, ims_per_gpu
 
 
-class ConciseMetricPrinter(EventWriter):
-    """Print a compact training summary instead of every auxiliary loss."""
-
-    def __init__(self, max_iter: int, window_size: int = 20) -> None:
-        self.max_iter = max_iter
-        self.window_size = window_size
-        self.logger = logging.getLogger("detectron2")
-
-    def write(self) -> None:
-        storage = get_event_storage()
-        iteration = storage.iter
-        latest = storage.latest_with_smoothing_hint(self.window_size)
-
-        def latest_value(name: str):
-            value = latest.get(name)
-            if value is None:
-                return None
-            return value[0] if isinstance(value, tuple) else value
-
-        pieces = [f"iter: {iteration}/{self.max_iter}"]
-        for name in ("total_loss", "loss_ce", "loss_bbox", "loss_giou", "loss_ce_dn"):
-            value = latest_value(name)
-            if value is not None:
-                pieces.append(f"{name}: {value:.4g}")
-
-        lr = latest_value("lr")
-        if lr is not None:
-            pieces.append(f"lr: {lr:.3g}")
-        if torch.cuda.is_available():
-            pieces.append(f"max_mem: {torch.cuda.max_memory_allocated() / 1024.0 / 1024.0:.0f}M")
-
-        self.logger.info("  ".join(pieces))
-
-
-class WandbWriter(EventWriter):
-    """Mirror EventStorage scalars (losses, AP, lr, ...) to Weights & Biases."""
-
-    def __init__(self, cfg, window_size: int = 20) -> None:
-        import wandb
-
-        self._wandb = wandb
-        self._window_size = window_size
-        self._last_write = -1
-        wandb.init(
-            project=cfg.WANDB.PROJECT,
-            entity=cfg.WANDB.ENTITY or None,
-            name=cfg.WANDB.NAME or None,
-            dir=cfg.OUTPUT_DIR,
-        )
-
-    def write(self) -> None:
-        storage = get_event_storage()
-        log_dict = {}
-        new_last_write = self._last_write
-        for key, (value, iteration) in storage.latest_with_smoothing_hint(self._window_size).items():
-            if iteration > self._last_write:
-                log_dict[key] = value
-                new_last_write = max(new_last_write, iteration)
-        if log_dict:
-            self._wandb.log(log_dict, step=new_last_write)
-        self._last_write = new_last_write
-
-    def close(self) -> None:
-        self._wandb.finish()
-
-
-class LossEvalHook(hooks.HookBase):
-    """Periodically compute the validation loss to monitor overfitting."""
+class MaskDINOLossEvalHook(LossEvalHook):
+    """LossEvalHook that also disables the criterion's cross-rank mask-count
+    sync while computing validation loss (only relevant for MaskDINO)."""
 
     def __init__(self, eval_period: int, model, data_loader) -> None:
-        self._period = eval_period
-        self._model = model
-        self._data_loader = data_loader
+        # Never run on the final iteration: it is inserted right after the AP
+        # EvalHook so both hooks issue their collective ops in the same order
+        # on every rank, and the AP EvalHook already covers the final iter.
+        super().__init__(eval_period, model, data_loader, run_on_final_iter=False)
+        self._sync_num_masks = None
 
-    def _do_loss_eval(self) -> None:
-        if comm.get_world_size() > 1:
-            comm.synchronize()
-
-        model = (
-            self._model.module
-            if isinstance(self._model, torch.nn.parallel.DistributedDataParallel)
-            else self._model
-        )
-        was_training = model.training
+    def _begin_eval(self, model) -> None:
         criterion = getattr(model, "criterion", None)
-        sync_num_masks = getattr(criterion, "sync_num_masks", None)
-        model.train()
-        if criterion is not None and sync_num_masks is not None:
+        self._sync_num_masks = getattr(criterion, "sync_num_masks", None)
+        if criterion is not None and self._sync_num_masks is not None:
             criterion.sync_num_masks = False
-        total: Dict[str, float] = {}
-        count = 0
-        try:
-            for inputs in self._data_loader:
-                with torch.no_grad():
-                    loss_dict = model(inputs)
-                if not isinstance(loss_dict, dict):
-                    raise TypeError(
-                        "LossEvalHook expected the model to return a loss dict. "
-                        f"Got {type(loss_dict).__name__} instead."
-                    )
-                for key, value in loss_dict.items():
-                    total[key] = total.get(key, 0.0) + float(value.detach().item())
-                count += 1
-        finally:
-            if criterion is not None and sync_num_masks is not None:
-                criterion.sync_num_masks = sync_num_masks
-            model.train(was_training)
 
-        keys = sorted(total)
-        if comm.get_world_size() > 1:
-            all_keys = comm.all_gather(keys)
-            keys = sorted(set().union(*all_keys))
-
-        device = (
-            torch.device("cuda", torch.cuda.current_device())
-            if torch.cuda.is_available()
-            else torch.device("cpu")
-        )
-        stats = torch.tensor(
-            [total.get(key, 0.0) for key in keys] + [float(count)],
-            dtype=torch.float64,
-            device=device,
-        )
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
-
-        count_sum = float(stats[-1].item())
-        if count_sum and comm.is_main_process():
-            means = {
-                f"val/{key}": float(stats[index].item() / count_sum)
-                for index, key in enumerate(keys)
-            }
-            means["val/total_loss"] = sum(means.values())
-            self.trainer.storage.put_scalars(**means, smoothing_hint=False)
-
-    def after_step(self) -> None:
-        next_iter = self.trainer.iter + 1
-        if self._period > 0 and next_iter % self._period == 0 and next_iter != self.trainer.max_iter:
-            self._do_loss_eval()
-
-
-class TqdmHook(hooks.HookBase):
-    def __init__(self, enabled: bool = True) -> None:
-        self.enabled = enabled and tqdm is not None and comm.is_main_process()
-        self.progress = None
-
-    def before_train(self) -> None:
-        if not self.enabled:
-            return
-        total = max(0, self.trainer.max_iter - self.trainer.start_iter)
-        self.progress = tqdm(total=total, dynamic_ncols=True, desc="training")
-
-    def after_step(self) -> None:
-        if self.progress is None:
-            return
-        self.progress.update(1)
-        storage = get_event_storage()
-        latest = storage.latest_with_smoothing_hint(20)
-
-        def latest_value(name: str):
-            value = latest.get(name)
-            if value is None:
-                return None
-            return value[0] if isinstance(value, tuple) else value
-
-        postfix = {}
-        total_loss = latest_value("total_loss")
-        lr = latest_value("lr")
-        if total_loss is not None:
-            postfix["loss"] = f"{total_loss:.3g}"
-        if lr is not None:
-            postfix["lr"] = f"{lr:.2g}"
-        if postfix:
-            self.progress.set_postfix(postfix, refresh=False)
-
-    def after_train(self) -> None:
-        if self.progress is not None:
-            self.progress.close()
-            self.progress = None
+    def _end_eval(self, model) -> None:
+        criterion = getattr(model, "criterion", None)
+        if criterion is not None and self._sync_num_masks is not None:
+            criterion.sync_num_masks = self._sync_num_masks
 
 
 class Trainer(DefaultTrainer):
@@ -486,7 +214,16 @@ class Trainer(DefaultTrainer):
         logger = logging.getLogger("detectron2")
         if not logger.isEnabledFor(logging.INFO):
             setup_logger()
-        cfg = DefaultTrainer.auto_scale_workers(cfg, comm.get_world_size())
+        if comm.is_main_process():
+            logger.info(
+                "Distributed training config: world_size=%d, global_batch=%d, "
+                "per_gpu_batch=%d, base_lr=%g, max_iter=%d",
+                comm.get_world_size(),
+                cfg.SOLVER.IMS_PER_BATCH,
+                cfg.SOLVER.IMS_PER_BATCH // comm.get_world_size(),
+                cfg.SOLVER.BASE_LR,
+                cfg.SOLVER.MAX_ITER,
+            )
 
         model = self.build_model(cfg)
         optimizer = self.build_optimizer(cfg, model)
@@ -526,7 +263,7 @@ class Trainer(DefaultTrainer):
         if self.cfg.TEST.EVAL_PERIOD > 0:
             # Insert right after the AP EvalHook so collective ordering is identical on every rank.
             eval_idx = next(i for i, hook in enumerate(hooks_list) if isinstance(hook, hooks.EvalHook))
-            hooks_list.insert(eval_idx + 1, LossEvalHook(self.cfg.TEST.EVAL_PERIOD, self.model, self.build_loss_loader(self.cfg)))
+            hooks_list.insert(eval_idx + 1, MaskDINOLossEvalHook(self.cfg.TEST.EVAL_PERIOD, self.model, self.build_loss_loader(self.cfg)))
         if getattr(self.cfg, "TRAIN_TQDM", True):
             hooks_list.insert(-1, TqdmHook(enabled=True))
         return hooks_list
@@ -534,8 +271,9 @@ class Trainer(DefaultTrainer):
     def build_writers(self):
         if not comm.is_main_process():
             return []
+        metric_names = ("total_loss", "loss_ce", "loss_bbox", "loss_giou", "loss_ce_dn")
         writers = [
-            ConciseMetricPrinter(self.max_iter),
+            ConciseMetricPrinter(self.max_iter, metric_names),
             JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
         ]
         if getattr(self.cfg, "LOGGER", "tensorboard") == "wandb":
@@ -548,28 +286,24 @@ class Trainer(DefaultTrainer):
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
-        evaluator_list = []
-        evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
+        if getattr(cfg, "ORTH_BBOX_ONLY", False):
+            return COCOEvaluator(dataset_name, tasks=("bbox",), output_dir=output_folder)
+        return COCOEvaluator(dataset_name, output_dir=output_folder)
 
-        if evaluator_type == "coco" or evaluator_type == "":
-            evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
-
-        if evaluator_type in ["sem_seg", "ade20k_panoptic_seg"]:
-            evaluator_list.append(SemSegEvaluator(dataset_name, distributed=True, output_dir=output_folder))
-
-        if len(evaluator_list) == 0:
-            return COCOEvaluator(dataset_name, output_dir=output_folder)
-        if len(evaluator_list) == 1:
-            return evaluator_list[0]
-        return DatasetEvaluators(evaluator_list)
+    @classmethod
+    def build_model(cls, cfg):
+        model = super().build_model(cfg)
+        if getattr(cfg, "ORTH_BBOX_ONLY", False):
+            configure_bbox_only_maskdino(model)
+        return model
 
     @staticmethod
-    def build_mapper(cfg, is_train):
+    def build_mapper(cfg, is_train, augmentations=None):
         name = cfg.INPUT.DATASET_MAPPER_NAME
         if name == "coco_instance_lsj":
             return COCOInstanceNewBaselineDatasetMapper(cfg, is_train)
         if name == "coco_instance_detr":
-            return DetrDatasetMapper(cfg, is_train)
+            return DetrDatasetMapper(cfg, is_train, augmentations=augmentations)
         if name == "coco_panoptic_lsj":
             return COCOPanopticNewBaselineDatasetMapper(cfg, is_train)
         if name == "mask_former_semantic":
@@ -583,7 +317,14 @@ class Trainer(DefaultTrainer):
     @classmethod
     def build_loss_loader(cls, cfg):
         # Keep is_train=True so the mapper yields annotations needed to compute losses.
-        return build_detection_test_loader(cfg, cfg.DATASETS.TEST[0], mapper=cls.build_mapper(cfg, True))
+        augmentations = None
+        if cfg.ORTH_AUGMENTATION.ENABLED:
+            augmentations = build_orth_augmentations(cfg, is_train=False)
+        return build_detection_test_loader(
+            cfg,
+            cfg.DATASETS.TEST[0],
+            mapper=cls.build_mapper(cfg, True, augmentations=augmentations),
+        )
 
     @classmethod
     def build_optimizer(cls, cfg, model):
@@ -658,37 +399,6 @@ class Trainer(DefaultTrainer):
             optimizer = maybe_add_gradient_clipping(cfg, optimizer)
         return optimizer
 
-    @classmethod
-    def test_with_TTA(cls, cfg, model):
-        logger = logging.getLogger("detectron2.trainer")
-        logger.info("Running inference with test-time augmentation ...")
-        model = SemanticSegmentorWithTTA(cfg, model)
-        evaluators = [
-            cls.build_evaluator(
-                cfg, name, output_folder=os.path.join(cfg.OUTPUT_DIR, "inference_TTA")
-            )
-            for name in cfg.DATASETS.TEST
-        ]
-        res = cls.test(cfg, model, evaluators)
-        return OrderedDict({k + "_TTA": v for k, v in res.items()})
-
-
-class UnifiedTrainer(Trainer):
-    @classmethod
-    def build_model(cls, cfg):
-        model = super().build_model(cfg)
-        if getattr(cfg, "ORTH_BBOX_ONLY", False):
-            configure_bbox_only_maskdino(model)
-        return model
-
-    @classmethod
-    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
-        if output_folder is None:
-            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
-        if getattr(cfg, "ORTH_BBOX_ONLY", False):
-            return COCOEvaluator(dataset_name, tasks=("bbox",), output_dir=output_folder)
-        return COCOEvaluator(dataset_name, output_dir=output_folder)
-
 
 def prepare_bbox_only_targets(self, targets, images):
     new_targets = []
@@ -755,57 +465,6 @@ class MaskDINOPredictor:
             image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
             inputs = [{"image": image, "height": height, "width": width}]
             return self.model(inputs)[0]
-
-
-def select_samples_per_class(dataset_dicts: list[dict], class_names: list[str], limit: int, seed: int):
-    rng = random.Random(seed)
-    records_by_class: dict[int, list[dict]] = {}
-    for record in dataset_dicts:
-        for cls_id in {ann["category_id"] for ann in record.get("annotations", [])}:
-            if 0 <= cls_id < len(class_names):
-                records_by_class.setdefault(cls_id, []).append(record)
-
-    samples_by_class = {}
-    for cls_id, class_name in enumerate(class_names):
-        records = records_by_class.get(cls_id, [])
-        rng.shuffle(records)
-        samples_by_class[cls_id] = records[: min(limit, len(records))]
-        print(f"Visualization class {cls_id} ({class_name}): {len(samples_by_class[cls_id])}/{len(records)}")
-    return samples_by_class
-
-
-def safe_path_name(name: str) -> str:
-    safe_name = "".join(char if char.isalnum() or char in "._-" else "_" for char in name)
-    return safe_name.strip("._") or "class"
-
-
-def add_panel_title(image_rgb: np.ndarray, title: str) -> np.ndarray:
-    header_height = 36
-    titled = np.full((image_rgb.shape[0] + header_height, image_rgb.shape[1], 3), 255, dtype=np.uint8)
-    titled[header_height:, :, :] = image_rgb
-    cv2.putText(titled, title, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)
-    return titled
-
-
-def strip_instance_masks(record: dict) -> dict:
-    stripped_record = {key: value for key, value in record.items() if key != "annotations"}
-    stripped_record["annotations"] = [
-        {key: value for key, value in ann.items() if key != "segmentation"}
-        for ann in record.get("annotations", [])
-    ]
-    return stripped_record
-
-
-def draw_gt_panel(image_rgb: np.ndarray, metadata, record: dict, draw_masks: bool) -> np.ndarray:
-    draw_record = record if draw_masks else strip_instance_masks(record)
-    return Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_dataset_dict(draw_record).get_image()
-
-
-def draw_pred_panel(image_rgb: np.ndarray, metadata, instances, draw_masks: bool) -> np.ndarray:
-    pred_instances = instances.to("cpu")
-    if not draw_masks and pred_instances.has("pred_masks"):
-        pred_instances.remove("pred_masks")
-    return Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_instance_predictions(pred_instances).get_image()
 
 
 def save_visualizations(cfg, limit: int, seed: int, score_thresh: float) -> None:
@@ -878,48 +537,39 @@ def setup(args):
     apply_default_paths(args)
     class_names = load_categories(args.train_json, args.task)
 
-    cfg = get_cfg()
-    add_deeplab_config(cfg)
-    add_maskdino_config(cfg)
-    cfg.set_new_allowed(True)
+    cfg = _build_base_cfg()
     cfg.ORTH_BBOX_ONLY = args.task == "orth"
 
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+    cfg.DISTRIBUTED.NUM_GPUS = int(args.num_gpus)
+    if args.batch_size is not None:
+        cfg.DISTRIBUTED.IMS_PER_GPU = int(args.batch_size)
 
     cfg.DATASETS.TRAIN = (f"{args.task}_train",)
     cfg.DATASETS.TEST = (f"{args.task}_val",)
-    cfg.OUTPUT_DIR = str(args.output_dir)
+    if args.output_dir is not None:
+        cfg.OUTPUT_DIR = str(args.output_dir)
     if args.wandb_name is not None:
         cfg.WANDB.NAME = args.wandb_name
     cfg.TRAIN_LOG_PERIOD = args.log_period
     cfg.TRAIN_TQDM = not args.no_tqdm
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
+    # Negative samples are handled via KEEP_NEGATIVE_RATIO in load_coco_dicts, not
+    # by dropping empty-annotation images, and RepeatFactorTrainingSampler is what
+    # the class-balance tuning here assumes. Both are fixed regardless of the yaml.
     cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False
     cfg.DATALOADER.SAMPLER_TRAIN = "RepeatFactorTrainingSampler"
     if args.repeat_threshold is not None:
         cfg.DATALOADER.REPEAT_THRESHOLD = args.repeat_threshold
-    elif cfg.DATALOADER.REPEAT_THRESHOLD <= 0:
-        cfg.DATALOADER.REPEAT_THRESHOLD = 0.05
 
     if args.keep_negative_ratio is None:
-        args.keep_negative_ratio = 0.1 if args.task == "caries" else 0.2
+        args.keep_negative_ratio = float(cfg.DATALOADER.KEEP_NEGATIVE_RATIO)
 
     num_classes = len(class_names)
     cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = num_classes
-    cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
-    if hasattr(cfg.MODEL, "MaskDINO"):
-        cfg.MODEL.MaskDINO.NUM_CLASSES = num_classes
-        if args.task == "orth":
-            cfg.MODEL.MaskDINO.TEST.TEST_FOUCUS_ON_BOX = True
     if args.task == "orth" and cfg.ORTH_CLASS_BALANCE.ENABLED:
-        loss_type = str(cfg.ORTH_CLASS_BALANCE.LOSS_TYPE).lower()
-        if loss_type != "positive_focal":
-            raise ValueError(
-                "MaskDINO orth class balance currently supports only "
-                f"LOSS_TYPE=positive_focal, got {loss_type}"
-            )
         cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS = compute_effective_class_weights(
             args.train_json,
             num_classes,
@@ -928,8 +578,19 @@ def setup(args):
             clip_max=float(cfg.ORTH_CLASS_BALANCE.CLIP_MAX),
         )
 
-    register_task_datasets(args, class_names)
-    validate_distributed_batch_size(cfg)
+    # instance_inference() does scores.flatten(0, 1).topk(TEST.DETECTIONS_PER_IMAGE);
+    # the flattened candidate pool has NUM_OBJECT_QUERIES * num_classes entries.
+    max_candidates = int(cfg.MODEL.MaskDINO.NUM_OBJECT_QUERIES) * num_classes
+    if max_candidates < int(cfg.TEST.DETECTIONS_PER_IMAGE):
+        raise ValueError(
+            f"MODEL.MaskDINO.NUM_OBJECT_QUERIES ({cfg.MODEL.MaskDINO.NUM_OBJECT_QUERIES}) * "
+            f"num_classes ({num_classes}) = {max_candidates}, which is less than "
+            f"TEST.DETECTIONS_PER_IMAGE ({cfg.TEST.DETECTIONS_PER_IMAGE}); "
+            "instance_inference()'s topk() would fail at eval time."
+        )
+
+    register_datasets(args, class_names, include_masks=args.task == "caries")
+    configure_distributed_solver(cfg, args, reference_global_batch=REFERENCE_GLOBAL_BATCH)
 
     cfg.freeze()
     if comm.is_main_process():
@@ -947,18 +608,18 @@ def main(args):
     print("Command cfg:", cfg)
 
     if args.eval_only:
-        model = UnifiedTrainer.build_model(cfg)
+        model = Trainer.build_model(cfg)
         PointerFreeDetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS,
             resume=args.resume,
         )
-        res = UnifiedTrainer.test(cfg, model)
+        res = Trainer.test(cfg, model)
         if comm.is_main_process():
             verify_results(cfg, res)
             save_visualizations(cfg, args.vis_samples, args.seed, args.vis_score_thresh)
         return res
 
-    trainer = UnifiedTrainer(cfg)
+    trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
     train_result = trainer.train()
     comm.synchronize()
@@ -975,8 +636,8 @@ def main(args):
 if __name__ == "__main__":
     parser = add_task_args(default_argument_parser())
     args = parser.parse_args()
-    port = random.randint(1000, 20000)
-    args.dist_url = "tcp://127.0.0.1:" + str(port)
+    args.num_gpus, args.batch_size = load_launch_settings(args)
+    validate_distributed_launch(args)
     print("Command Line Args:", args)
     print("pwd:", os.getcwd())
     launch(

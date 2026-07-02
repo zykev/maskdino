@@ -9,6 +9,7 @@ from detectron2.data import detection_utils as utils
 from detectron2.data import transforms as T
 from detectron2.data.transforms import TransformGen
 from pycocotools import mask as coco_mask
+from datasets_coco.orth_augmentations import build_orth_augmentations
 __all__ = ["DetrDatasetMapper"]
 def convert_coco_poly_to_mask(segmentations, height, width):
     masks = []
@@ -67,17 +68,24 @@ class DetrDatasetMapper:
     4. Prepare image and annotation to Tensors
     """
 
-    def __init__(self, cfg, is_train=True):
-        if cfg.INPUT.CROP.ENABLED and is_train:
+    def __init__(self, cfg, is_train=True, augmentations=None):
+        if augmentations is not None:
+            self.crop_gen = None
+            self.tfm_gens = augmentations
+        elif hasattr(cfg, "ORTH_AUGMENTATION") and cfg.ORTH_AUGMENTATION.ENABLED:
+            self.crop_gen = None
+            self.tfm_gens = build_orth_augmentations(cfg, is_train)
+        elif cfg.INPUT.CROP.ENABLED and is_train:
             self.crop_gen = [
                 T.ResizeShortestEdge([400, 500, 600], sample_style="choice"),
                 T.RandomCrop(cfg.INPUT.CROP.TYPE, cfg.INPUT.CROP.SIZE),
             ]
+            self.tfm_gens = build_transform_gen(cfg, is_train)
         else:
             self.crop_gen = None
+            self.tfm_gens = build_transform_gen(cfg, is_train)
 
         self.mask_on = True
-        self.tfm_gens = build_transform_gen(cfg, is_train)
         logging.getLogger(__name__).info(
             "Full TransformGens used in training: {}, crop: {}".format(str(self.tfm_gens), str(self.crop_gen))
         )

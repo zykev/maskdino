@@ -4,15 +4,12 @@ MODEL:
   SEM_SEG_HEAD:
     NAME: "MaskDINOHead"
     IGNORE_VALUE: 255
-    # maskdino_unify.py overwrites NUM_CLASSES from datasets_coco/datasets_to_coco.py.
-    NUM_CLASSES: 1
     LOSS_WEIGHT: 1.0
     CONVS_DIM: 256
     MASK_DIM: 256
     NORM: "GN"
     PIXEL_DECODER_NAME: "MaskDINOEncoder"
     DIM_FEEDFORWARD: 1024
-    NUM_FEATURE_LEVELS: 3
     TOTAL_NUM_FEATURE_LEVELS: 3
     IN_FEATURES: ["res2", "res3", "res4", "res5"]
     DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES: ["res3", "res4", "res5"]
@@ -32,8 +29,6 @@ MODEL:
     NHEADS: 8
     DROPOUT: 0.0
     DIM_FEEDFORWARD: 2048
-    ENC_LAYERS: 0
-    PRE_NORM: False
     ENFORCE_INPUT_PROJ: False
     SIZE_DIVISIBILITY: 32
     DEC_LAYERS: 9
@@ -49,8 +44,6 @@ MODEL:
       SEMANTIC_ON: False
       INSTANCE_ON: True
       PANOPTIC_ON: False
-      OVERLAP_THRESHOLD: 0.8
-      OBJECT_MASK_THRESHOLD: 0.5
 
 INPUT:
   DATASET_MAPPER_NAME: coco_instance_detr
@@ -65,15 +58,16 @@ INPUT:
 
 DATALOADER:
   NUM_WORKERS: 4
-  FILTER_EMPTY_ANNOTATIONS: false
-  SAMPLER_TRAIN: RepeatFactorTrainingSampler
   REPEAT_THRESHOLD: 0.05
   KEEP_NEGATIVE_RATIO: 0.1
+
+DISTRIBUTED:
+  NUM_GPUS: 2
+  IMS_PER_GPU: 1
 
 SOLVER:
   AMP:
     ENABLED: True
-  IMS_PER_BATCH: 2
   BASE_LR: 0.00025
   MAX_ITER: 3000
   STEPS: []

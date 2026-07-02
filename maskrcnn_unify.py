@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import random
 import types
 import warnings
-from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -20,24 +18,45 @@ import detectron2.engine.hooks as d2_hooks
 from detectron2 import model_zoo
 from detectron2.config import CfgNode as CN
 from detectron2.config import get_cfg
-from detectron2.data import DatasetCatalog, DatasetMapper, MetadataCatalog, build_detection_test_loader
+from detectron2.data import (
+    DatasetCatalog,
+    DatasetMapper,
+    MetadataCatalog,
+    build_detection_test_loader,
+    build_detection_train_loader,
+)
 from detectron2.engine import DefaultPredictor, DefaultTrainer, launch
-from detectron2.engine.hooks import HookBase
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset
-from detectron2.structures import BoxMode
-from detectron2.utils.events import EventWriter, JSONWriter, TensorboardXWriter, get_event_storage
+from detectron2.utils.events import JSONWriter, TensorboardXWriter
 from detectron2.utils.logger import setup_logger
-from detectron2.utils.visualizer import Visualizer
 import detectron2.utils.comm as comm
 import torch.nn.functional as F
 
-from datasets_coco.datasets_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
+from datasets_coco.class_balance import add_class_balance_config, compute_effective_class_weights
+from datasets_coco.orth_augmentations import (
+    add_orth_augmentation_config,
+    build_orth_augmentations,
+)
 from task_paths import add_input_dir_arg, resolve_task_paths
+from unify_common import (
+    ConciseMetricPrinter,
+    LossEvalHook,
+    TqdmHook,
+    WandbWriter,
+    add_panel_title,
+    configure_distributed_solver,
+    count_visible_gpus,
+    draw_gt_panel,
+    draw_pred_panel,
+    load_categories,
+    make_checkpointer_pointer_free,
+    register_datasets,
+    safe_path_name,
+    select_samples_per_class,
+    validate_distributed_launch,
+)
 
-try:
-    from tqdm.auto import tqdm
-except ImportError:
-    tqdm = None
+REFERENCE_GLOBAL_BATCH = {"caries": 4, "orth": 2}
 
 warnings.filterwarnings(
     "ignore",
@@ -51,29 +70,6 @@ warnings.filterwarnings(
 )
 
 
-def configure_pointer_free_checkpointer(checkpointer) -> None:
-    def tag_last_checkpoint(self, last_filename_basename: str) -> None:
-        return
-
-    def latest_checkpoint(self) -> str:
-        if not self.save_dir:
-            return ""
-        checkpoints = list(Path(self.save_dir).glob("model_*.pth"))
-        if not checkpoints:
-            return ""
-        return str(max(checkpoints, key=lambda path: path.stat().st_mtime))
-
-    def has_checkpoint(self) -> bool:
-        return bool(latest_checkpoint(self))
-
-    def get_checkpoint_file(self) -> str:
-        return latest_checkpoint(self)
-
-    checkpointer.tag_last_checkpoint = types.MethodType(tag_last_checkpoint, checkpointer)
-    checkpointer.has_checkpoint = types.MethodType(has_checkpoint, checkpointer)
-    checkpointer.get_checkpoint_file = types.MethodType(get_checkpoint_file, checkpointer)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Unified Mask R-CNN runner for caries or orth tasks.")
     parser.add_argument(
@@ -83,7 +79,6 @@ def parse_args() -> argparse.Namespace:
         help="caries: single_tooth instance segmentation; orth: orthodontic object detection.",
     )
     parser.add_argument("--config_file", default=None, type=Path)
-    parser.add_argument("--num_gpus", type=int, default=1)
     parser.add_argument("--num_machines", type=int, default=1)
     parser.add_argument("--machine_rank", type=int, default=0)
     parser.add_argument("--dist_url", default=None)
@@ -95,7 +90,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--max_iter", default=None, type=int)
     parser.add_argument("--eval_period", default=None, type=int)
-    parser.add_argument("--ims_per_batch", default=None, type=int)
+    parser.add_argument(
+        "--batch_size",
+        "--batch-size",
+        dest="batch_size",
+        default=None,
+        type=int,
+        help="Per-GPU batch size. Overrides DISTRIBUTED.IMS_PER_GPU.",
+    )
     parser.add_argument("--base_lr", default=None, type=float)
     parser.add_argument("--num_workers", default=None, type=int)
     parser.add_argument("--score_thresh", default=None, type=float)
@@ -119,61 +121,54 @@ def default_paths(args: argparse.Namespace) -> argparse.Namespace:
     resolve_task_paths(args)
     if args.task == "caries":
         args.config_file = config_file or Path("configs/default_maskrcnn_caries_config.yaml")
-        args.output_dir = args.output_dir or Path("output/maskrcnn_caries")
     else:
         args.config_file = config_file or Path("configs/default_maskrcnn_orth_config.yaml")
-        args.output_dir = args.output_dir or Path("output/maskrcnn_orth")
     return args
 
 
-def load_categories(json_path: Path, task: str) -> list[str]:
-    if task == "caries":
-        return [item["name"] for item in sorted(CARIES_CATEGORIES_INFO, key=lambda item: item["id"])]
-
-    with json_path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    return [category["name"] for category in sorted(data["categories"], key=lambda item: item["id"])]
+def add_distributed_config(cfg) -> None:
+    cfg.DISTRIBUTED = CN()
+    cfg.DISTRIBUTED.NUM_GPUS = 1
+    cfg.DISTRIBUTED.IMS_PER_GPU = 1
 
 
-def compute_effective_class_weights(
-    json_path: Path,
-    num_classes: int,
-    *,
-    beta: float,
-    clip_min: float,
-    clip_max: float,
-) -> list[float]:
-    with json_path.open("r", encoding="utf-8") as f:
-        coco_data = json.load(f)
-
-    counts = np.zeros(num_classes, dtype=np.float64)
-    for ann in coco_data.get("annotations", []):
-        class_index = int(ann["category_id"]) - 1
-        if 0 <= class_index < num_classes:
-            counts[class_index] += 1.0
-
-    effective_counts = np.maximum(counts, 1.0)
-    weights = (1.0 - beta) / (1.0 - np.power(beta, effective_counts))
-    weights = np.clip(weights, clip_min, clip_max)
-    weights = weights * (num_classes / weights.sum())
-    print(
-        "Orth class-balance counts:",
-        {index: int(count) for index, count in enumerate(counts.tolist())},
+def _build_base_cfg():
+    cfg = get_cfg()
+    cfg.set_new_allowed(True)
+    add_class_balance_config(cfg)
+    add_orth_augmentation_config(cfg)
+    add_distributed_config(cfg)
+    cfg.DATALOADER.KEEP_NEGATIVE_RATIO = 0.5
+    cfg.merge_from_file(
+        model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     )
-    print("Orth effective-number weights:", [round(float(weight), 4) for weight in weights])
-    return [float(weight) for weight in weights]
+    return cfg
 
 
-def add_class_balance_config(cfg) -> None:
-    cfg.ORTH_CLASS_BALANCE = CN()
-    cfg.ORTH_CLASS_BALANCE.ENABLED = False
-    cfg.ORTH_CLASS_BALANCE.BETA = 0.999
-    cfg.ORTH_CLASS_BALANCE.CLIP_MIN = 0.25
-    cfg.ORTH_CLASS_BALANCE.CLIP_MAX = 5.0
-    cfg.ORTH_CLASS_BALANCE.LOSS_TYPE = "weighted_ce"
-    cfg.ORTH_CLASS_BALANCE.FOCAL_GAMMA = 2.0
-    cfg.ORTH_CLASS_BALANCE.BACKGROUND_WEIGHT = 1.0
-    cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS = []
+def load_launch_settings(args: argparse.Namespace) -> tuple[int, int]:
+    default_paths(args)
+    cfg = _build_base_cfg()
+    if args.config_file:
+        cfg.merge_from_file(str(args.config_file))
+
+    visible_gpu_count = count_visible_gpus()
+    num_gpus = (
+        visible_gpu_count
+        if visible_gpu_count is not None
+        else int(cfg.DISTRIBUTED.NUM_GPUS)
+    )
+    ims_per_gpu = (
+        int(args.batch_size)
+        if args.batch_size is not None
+        else int(cfg.DISTRIBUTED.IMS_PER_GPU)
+    )
+    if num_gpus < 1:
+        raise ValueError(f"DISTRIBUTED.NUM_GPUS must be positive, got {num_gpus}.")
+    if ims_per_gpu < 1:
+        raise ValueError(
+            f"DISTRIBUTED.IMS_PER_GPU must be positive, got {ims_per_gpu}."
+        )
+    return num_gpus, ims_per_gpu
 
 
 def configure_maskrcnn_class_balance(model, cfg) -> None:
@@ -238,114 +233,13 @@ def configure_maskrcnn_class_balance(model, cfg) -> None:
     print(f"Enabled orth Mask R-CNN class-balanced ROI {loss_type} loss")
 
 
-def resolve_image_path(data_dir: Path, file_name: str) -> str:
-    path = Path(file_name)
-    if path.is_absolute() or path.exists():
-        return str(path)
-    return str(data_dir / file_name)
-
-
-def load_coco_dicts(
-    data_dir: Path,
-    json_path: Path,
-    *,
-    include_masks: bool,
-    is_train: bool,
-    keep_negative_ratio: float,
-    seed: int,
-) -> list[dict]:
-    if not 0.0 <= keep_negative_ratio <= 1.0:
-        raise ValueError("--keep_negative_ratio must be between 0.0 and 1.0")
-
-    with json_path.open("r", encoding="utf-8") as f:
-        coco_data = json.load(f)
-
-    images = {image["id"]: image for image in coco_data["images"]}
-    annotations_by_image: dict[int, list[dict]] = {image_id: [] for image_id in images}
-    for ann in coco_data["annotations"]:
-        annotations_by_image.setdefault(ann["image_id"], []).append(ann)
-
-    rng = random.Random(seed)
-    dataset_dicts = []
-    negative_count = 0
-    kept_negative_count = 0
-
-    for image_id, image_info in images.items():
-        anns = annotations_by_image.get(image_id, [])
-        if not anns:
-            negative_count += 1
-            if is_train and rng.random() > keep_negative_ratio:
-                continue
-            kept_negative_count += 1
-
-        record = {
-            "file_name": resolve_image_path(data_dir, image_info["file_name"]),
-            "image_id": image_id,
-            "height": image_info["height"],
-            "width": image_info["width"],
-            "annotations": [],
-        }
-        for ann in anns:
-            obj = {
-                "bbox": ann["bbox"],
-                "bbox_mode": BoxMode.XYWH_ABS,
-                "category_id": ann["category_id"] - 1,
-                "iscrowd": ann.get("iscrowd", 0),
-            }
-            if include_masks and ann.get("segmentation"):
-                obj["segmentation"] = ann["segmentation"]
-            record["annotations"].append(obj)
-
-        dataset_dicts.append(record)
-
-    split_name = "train" if is_train else "val"
-    print(
-        f"[{split_name}] loaded {len(dataset_dicts)} images from {json_path}; "
-        f"kept {kept_negative_count}/{negative_count} empty negative samples"
-    )
-    return dataset_dicts
-
-
-def register_datasets(args: argparse.Namespace, class_names: list[str]) -> None:
-    include_masks = args.task == "caries"
-    for split, json_path in {"train": args.train_json, "val": args.test_json}.items():
-        dataset_name = f"{args.task}_{split}"
-        if dataset_name in DatasetCatalog.list():
-            DatasetCatalog.remove(dataset_name)
-        if dataset_name in MetadataCatalog.list():
-            MetadataCatalog.remove(dataset_name)
-
-        is_train = split == "train"
-        DatasetCatalog.register(
-            dataset_name,
-            lambda json_path=json_path, is_train=is_train: load_coco_dicts(
-                args.data_dir,
-                json_path,
-                include_masks=include_masks,
-                is_train=is_train,
-                keep_negative_ratio=args.keep_negative_ratio,
-                seed=args.seed,
-            ),
-        )
-        MetadataCatalog.get(dataset_name).set(
-            thing_classes=class_names,
-            evaluator_type="coco",
-            json_file=str(json_path),
-            image_root=str(args.data_dir),
-            thing_dataset_id_to_contiguous_id={
-                category_id: category_id - 1 for category_id in range(1, len(class_names) + 1)
-            },
-        )
-
-
 def build_cfg(args: argparse.Namespace, num_classes: int):
-    cfg = get_cfg()
-    cfg.set_new_allowed(True)
-    add_class_balance_config(cfg)
-    cfg.DATALOADER.KEEP_NEGATIVE_RATIO = 0.5
-    cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
+    cfg = _build_base_cfg()
     if args.config_file:
         cfg.merge_from_file(str(args.config_file))
+    cfg.DISTRIBUTED.NUM_GPUS = int(args.num_gpus)
+    if args.batch_size is not None:
+        cfg.DISTRIBUTED.IMS_PER_GPU = int(args.batch_size)
 
     cfg.DATASETS.TRAIN = (f"{args.task}_train",)
     cfg.DATASETS.TEST = (f"{args.task}_val",)
@@ -356,7 +250,6 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     repeat_threshold = getattr(args, "repeat_threshold", None)
     keep_negative_ratio = getattr(args, "keep_negative_ratio", None)
     score_thresh = getattr(args, "score_thresh", None)
-    ims_per_batch = getattr(args, "ims_per_batch", None)
     base_lr = getattr(args, "base_lr", None)
     max_iter = getattr(args, "max_iter", None)
     eval_period = getattr(args, "eval_period", None)
@@ -374,8 +267,6 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
         args.keep_negative_ratio = cfg.DATALOADER.KEEP_NEGATIVE_RATIO
     if score_thresh is not None:
         cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_thresh
-    if ims_per_batch is not None:
-        cfg.SOLVER.IMS_PER_BATCH = ims_per_batch
     if base_lr is not None:
         cfg.SOLVER.BASE_LR = base_lr
     if max_iter is not None:
@@ -399,6 +290,7 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
             clip_min=float(cfg.ORTH_CLASS_BALANCE.CLIP_MIN),
             clip_max=float(cfg.ORTH_CLASS_BALANCE.CLIP_MAX),
         )
+    configure_distributed_solver(cfg, args, reference_global_batch=REFERENCE_GLOBAL_BATCH[args.task])
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
     if weights:
@@ -418,152 +310,12 @@ def save_resolved_config(cfg) -> Path:
     return config_path
 
 
-class LossEvalHook(HookBase):
-    """Periodically compute the validation loss to monitor overfitting."""
-
-    def __init__(self, eval_period: int, model, data_loader):
-        self._period = eval_period
-        self._model = model
-        self._data_loader = data_loader
-
-    def _do_loss_eval(self):
-        total: dict[str, float] = {}
-        count = 0
-        self._model.train()
-        with torch.no_grad():
-            for inputs in self._data_loader:
-                loss_dict = self._model(inputs)
-                for key, value in loss_dict.items():
-                    total[key] = total.get(key, 0.0) + value.item()
-                count += 1
-        # Aggregate per-worker sums with a single collective to avoid deadlocks on uneven shards.
-        all_total = comm.all_gather(total)
-        count_sum = sum(comm.all_gather(count))
-        if count_sum and comm.is_main_process():
-            keys = set().union(*[part.keys() for part in all_total])
-            means = {f"val/{key}": sum(part.get(key, 0.0) for part in all_total) / count_sum for key in keys}
-            means["val/total_loss"] = sum(means.values())
-            self.trainer.storage.put_scalars(**means, smoothing_hint=False)
-
-    def after_step(self):
-        next_iter = self.trainer.iter + 1
-        is_final = next_iter == self.trainer.max_iter
-        if is_final or (self._period > 0 and next_iter % self._period == 0):
-            self._do_loss_eval()
-
-
-class WandbWriter(EventWriter):
-    """Mirror EventStorage scalars (losses, AP, lr, ...) to Weights & Biases."""
-
-    def __init__(self, cfg, window_size: int = 20) -> None:
-        import wandb
-
-        self._wandb = wandb
-        self._window_size = window_size
-        self._last_write = -1
-        wandb.init(
-            project=cfg.WANDB.PROJECT,
-            entity=cfg.WANDB.ENTITY or None,
-            name=cfg.WANDB.NAME or None,
-            dir=cfg.OUTPUT_DIR,
-        )
-
-    def write(self) -> None:
-        storage = get_event_storage()
-        log_dict = {}
-        new_last_write = self._last_write
-        for key, (value, iteration) in storage.latest_with_smoothing_hint(self._window_size).items():
-            if iteration > self._last_write:
-                log_dict[key] = value
-                new_last_write = max(new_last_write, iteration)
-        if log_dict:
-            self._wandb.log(log_dict, step=new_last_write)
-        self._last_write = new_last_write
-
-    def close(self) -> None:
-        self._wandb.finish()
-
-
-class ConciseMetricPrinter(EventWriter):
-    """Print a compact training summary while preserving full metrics on disk."""
-
-    def __init__(self, max_iter: int, window_size: int = 20) -> None:
-        self.max_iter = max_iter
-        self.window_size = window_size
-        self.logger = logging.getLogger("detectron2")
-
-    def write(self) -> None:
-        storage = get_event_storage()
-        iteration = storage.iter
-        latest = storage.latest_with_smoothing_hint(self.window_size)
-
-        def latest_value(name: str):
-            value = latest.get(name)
-            if value is None:
-                return None
-            return value[0] if isinstance(value, tuple) else value
-
-        pieces = [f"iter: {iteration}/{self.max_iter}"]
-        for name in ("total_loss", "loss_cls", "loss_box_reg", "loss_mask", "val/total_loss"):
-            value = latest_value(name)
-            if value is not None:
-                pieces.append(f"{name}: {value:.4g}")
-
-        lr = latest_value("lr")
-        if lr is not None:
-            pieces.append(f"lr: {lr:.3g}")
-        if torch.cuda.is_available():
-            pieces.append(f"max_mem: {torch.cuda.max_memory_allocated() / 1024.0 / 1024.0:.0f}M")
-
-        self.logger.info("  ".join(pieces))
-
-
-class TqdmHook(HookBase):
-    def __init__(self, enabled: bool = True) -> None:
-        self.enabled = enabled and tqdm is not None and comm.is_main_process()
-        self.progress = None
-
-    def before_train(self) -> None:
-        if not self.enabled:
-            return
-        total = max(0, self.trainer.max_iter - self.trainer.start_iter)
-        self.progress = tqdm(total=total, dynamic_ncols=True, desc="training")
-
-    def after_step(self) -> None:
-        if self.progress is None:
-            return
-        self.progress.update(1)
-        storage = get_event_storage()
-        latest = storage.latest_with_smoothing_hint(20)
-
-        def latest_value(name: str):
-            value = latest.get(name)
-            if value is None:
-                return None
-            return value[0] if isinstance(value, tuple) else value
-
-        postfix = {}
-        total_loss = latest_value("total_loss")
-        lr = latest_value("lr")
-        if total_loss is not None:
-            postfix["loss"] = f"{total_loss:.3g}"
-        if lr is not None:
-            postfix["lr"] = f"{lr:.2g}"
-        if postfix:
-            self.progress.set_postfix(postfix, refresh=False)
-
-    def after_train(self) -> None:
-        if self.progress is not None:
-            self.progress.close()
-            self.progress = None
-
-
 class Trainer(DefaultTrainer):
     def __init__(self, cfg):
         super().__init__(cfg)
-        # PeriodicCheckpointer keeps this same object, so patching it here
-        # disables the pointer file for both periodic and final saves.
-        configure_pointer_free_checkpointer(self.checkpointer)
+        # PeriodicCheckpointer keeps this same object, so retrofitting its
+        # class here disables the pointer file for both periodic and final saves.
+        make_checkpointer_pointer_free(self.checkpointer)
         if getattr(cfg, "ORTH_CLASS_BALANCE", None) and cfg.ORTH_CLASS_BALANCE.ENABLED:
             configure_maskrcnn_class_balance(self.model, cfg)
 
@@ -573,16 +325,35 @@ class Trainer(DefaultTrainer):
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
         return COCOEvaluator(dataset_name, output_dir=output_folder)
 
+    @classmethod
+    def build_train_loader(cls, cfg):
+        if not cfg.ORTH_AUGMENTATION.ENABLED:
+            return super().build_train_loader(cfg)
+        mapper = DatasetMapper(
+            cfg,
+            is_train=True,
+            augmentations=build_orth_augmentations(cfg, is_train=True),
+        )
+        return build_detection_train_loader(cfg, mapper=mapper)
+
     def build_hooks(self):
         hooks_list = super().build_hooks()
         log_period = max(1, int(getattr(self.cfg, "TRAIN_LOG_PERIOD", 100)))
         for hook in hooks_list:
             if isinstance(hook, d2_hooks.PeriodicWriter) and hasattr(hook, "_period"):
                 hook._period = log_period
+        if self.cfg.ORTH_AUGMENTATION.ENABLED:
+            val_mapper = DatasetMapper(
+                self.cfg,
+                is_train=True,
+                augmentations=build_orth_augmentations(self.cfg, is_train=False),
+            )
+        else:
+            val_mapper = DatasetMapper(self.cfg, is_train=True)
         val_loader = build_detection_test_loader(
             self.cfg,
             self.cfg.DATASETS.TEST[0],
-            mapper=DatasetMapper(self.cfg, is_train=True),
+            mapper=val_mapper,
         )
         # Insert right after the AP EvalHook so collective ordering is identical on every rank.
         eval_idx = next(i for i, hook in enumerate(hooks_list) if isinstance(hook, d2_hooks.EvalHook))
@@ -594,8 +365,9 @@ class Trainer(DefaultTrainer):
     def build_writers(self):
         if not comm.is_main_process():
             return []
+        metric_names = ("total_loss", "loss_cls", "loss_box_reg", "loss_mask", "val/total_loss")
         writers = [
-            ConciseMetricPrinter(self.max_iter),
+            ConciseMetricPrinter(self.max_iter, metric_names),
             JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
         ]
         if getattr(self.cfg, "LOGGER", "tensorboard") == "wandb":
@@ -618,58 +390,6 @@ def evaluate(cfg) -> dict:
     results = inference_on_dataset(predictor.model, val_loader, evaluator)
     print(results)
     return results
-
-
-def select_samples_per_class(dataset_dicts: list[dict], class_names: list[str], limit: int, seed: int):
-    rng = random.Random(seed)
-    records_by_class: dict[int, list[dict]] = defaultdict(list)
-    for record in dataset_dicts:
-        for cls_id in {ann["category_id"] for ann in record.get("annotations", [])}:
-            if 0 <= cls_id < len(class_names):
-                records_by_class[cls_id].append(record)
-
-    samples_by_class = {}
-    for cls_id, class_name in enumerate(class_names):
-        records = records_by_class.get(cls_id, [])
-        rng.shuffle(records)
-        samples_by_class[cls_id] = records[: min(limit, len(records))]
-        print(f"Visualization class {cls_id} ({class_name}): {len(samples_by_class[cls_id])}/{len(records)}")
-    return samples_by_class
-
-
-def safe_path_name(name: str) -> str:
-    safe_name = "".join(char if char.isalnum() or char in "._-" else "_" for char in name)
-    return safe_name.strip("._") or "class"
-
-
-def add_panel_title(image_rgb: np.ndarray, title: str) -> np.ndarray:
-    header_height = 36
-    titled = np.full((image_rgb.shape[0] + header_height, image_rgb.shape[1], 3), 255, dtype=np.uint8)
-    titled[header_height:, :, :] = image_rgb
-    cv2.putText(titled, title, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)
-    return titled
-
-
-def strip_instance_masks(record: dict) -> dict:
-    stripped_record = {key: value for key, value in record.items() if key != "annotations"}
-    stripped_record["annotations"] = []
-    for ann in record.get("annotations", []):
-        stripped_record["annotations"].append(
-            {key: value for key, value in ann.items() if key != "segmentation"}
-        )
-    return stripped_record
-
-
-def draw_gt_panel(image_rgb: np.ndarray, metadata, record: dict, draw_masks: bool) -> np.ndarray:
-    draw_record = record if draw_masks else strip_instance_masks(record)
-    return Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_dataset_dict(draw_record).get_image()
-
-
-def draw_pred_panel(image_rgb: np.ndarray, metadata, instances, draw_masks: bool) -> np.ndarray:
-    pred_instances = instances.to("cpu")
-    if not draw_masks and pred_instances.has("pred_masks"):
-        pred_instances.remove("pred_masks")
-    return Visualizer(image_rgb, metadata=metadata, scale=0.8).draw_instance_predictions(pred_instances).get_image()
 
 
 def save_visualizations(cfg, limit: int, seed: int, score_thresh: float) -> None:
@@ -734,28 +454,50 @@ def main(args: argparse.Namespace) -> None:
     args = default_paths(args)
     class_names = load_categories(args.train_json, args.task)
     cfg = build_cfg(args, len(class_names))
-    register_datasets(args, class_names)
+    register_datasets(args, class_names, include_masks=args.task == "caries")
+
+    if comm.is_main_process():
+        logging.getLogger("detectron2").info(
+            "Distributed training config: world_size=%d, global_batch=%d, "
+            "per_gpu_batch=%d, base_lr=%g, max_iter=%d",
+            comm.get_world_size(),
+            cfg.SOLVER.IMS_PER_BATCH,
+            cfg.DISTRIBUTED.IMS_PER_GPU,
+            cfg.SOLVER.BASE_LR,
+            cfg.SOLVER.MAX_ITER,
+        )
+        save_resolved_config(cfg)
 
     if args.eval_only:
         evaluate(cfg)
-        save_visualizations(cfg, args.vis_samples, args.seed, args.vis_score_thresh)
+        comm.synchronize()
+        if comm.is_main_process():
+            save_visualizations(
+                cfg, args.vis_samples, args.seed, args.vis_score_thresh
+            )
         return
 
-    save_resolved_config(cfg)
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
     trainer.train()
 
     cfg.MODEL.WEIGHTS = str(Path(cfg.OUTPUT_DIR) / "model_final.pth")
     evaluate(cfg)
-    save_visualizations(cfg, args.vis_samples, args.seed, args.vis_score_thresh)
+    comm.synchronize()
+    if comm.is_main_process():
+        save_visualizations(cfg, args.vis_samples, args.seed, args.vis_score_thresh)
 
 
 if __name__ == "__main__":
     torch.multiprocessing.set_sharing_strategy("file_system")
     args = parse_args()
+    args.num_gpus, args.batch_size = load_launch_settings(args)
     if args.dist_url is None:
+        # Fill in a local default before validating so a missing --dist_url on a
+        # multi-machine launch is caught below instead of silently binding to
+        # this machine only.
         args.dist_url = f"tcp://127.0.0.1:{random.randint(1000, 20000)}"
+    validate_distributed_launch(args)
     launch(
         main,
         args.num_gpus,
