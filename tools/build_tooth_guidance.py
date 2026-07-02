@@ -24,6 +24,12 @@ from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 from tqdm import tqdm
 
+# fmt: off
+import os
+import sys
+sys.path.insert(1, os.path.join(sys.path[0], '..'))
+# fmt: on
+
 from tools.sam import sam_load, sam_predict
 from utils import suppress_stdout
 
