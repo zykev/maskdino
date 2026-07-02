@@ -14,7 +14,7 @@ MODEL:
     PRETRAIN_IMG_SIZE: 224
   # Set this to a Swin-MAE checkpoint when fine-tuning from MAE pretraining.
   # Decoder/reconstruction weights are ignored by D2SwinMAEBackbone.
-  WEIGHTS: ""
+  WEIGHTS: "/home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth"
   MaskDINO:
     SIZE_DIVISIBILITY: 224
 
