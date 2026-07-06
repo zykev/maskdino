@@ -77,21 +77,28 @@ ORTH_AUGMENTATION:
   ENABLED: true
   HORIZONTAL_FLIP_PROB: 0.5
   ROTATION_PROB: 0.3
-  ROTATION_ANGLE: 7.0
-  COLOR_PROB: 0.2
-  BRIGHTNESS_MIN: 0.85
-  BRIGHTNESS_MAX: 1.15
-  CONTRAST_MIN: 0.90
-  CONTRAST_MAX: 1.10
-  SATURATION_MIN: 0.90
-  SATURATION_MAX: 1.10
+  # Photos are hand-held, not rig-aligned; wider angle range better matches
+  # real capture variance. Rotating the 2D photo doesn't change the actual
+  # bite relationship, so this is safe for orth's geometric anomaly labels.
+  ROTATION_ANGLE: 12.0
+  # Orth categories are geometric (overjet/crossbite/missing teeth/...), not
+  # color-dependent findings, so color jitter carries little label risk here.
+  COLOR_PROB: 0.45
+  BRIGHTNESS_MIN: 0.72
+  BRIGHTNESS_MAX: 1.28
+  CONTRAST_MIN: 0.72
+  CONTRAST_MAX: 1.28
+  SATURATION_MIN: 0.72
+  SATURATION_MAX: 1.28
   GAMMA_PROB: 0.2
-  GAMMA_MIN: 0.90
-  GAMMA_MAX: 1.10
+  GAMMA_MIN: 0.80
+  GAMMA_MAX: 1.20
   QUALITY_PROB: 0.2
+  # Median bbox sqrt-area is ~264px at short-edge=800 (COCO "large" territory),
+  # so stronger blur/compression is unlikely to erase the target.
   BLUR_SIGMA_MIN: 0.10
-  BLUR_SIGMA_MAX: 0.80
-  JPEG_QUALITY_MIN: 75
+  BLUR_SIGMA_MAX: 1.75
+  JPEG_QUALITY_MIN: 55
   JPEG_QUALITY_MAX: 100
 
 DISTRIBUTED:

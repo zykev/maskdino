@@ -208,13 +208,17 @@ def build_orth_augmentations(cfg, is_train: bool) -> list[T.Augmentation]:
 
 
 def representative_augmentation_transforms() -> list[tuple[str, object]]:
-    """Deterministic transforms used by the montage script."""
+    """Deterministic transforms used by the montage script.
+
+    Values mirror the strongest end of each ORTH_AUGMENTATION range in
+    default_maskdino_orth_base_config.yaml; keep the two in sync.
+    """
     return [
         ("Horizontal flip", T.RandomFlip(prob=1.0, horizontal=True, vertical=False)),
         (
-            "Rotation +7 deg",
+            "Rotation +12 deg",
             T.RandomRotation(
-                angle=[7.0, 7.0],
+                angle=[12.0, 12.0],
                 expand=False,
                 sample_style="range",
             ),
@@ -222,10 +226,10 @@ def representative_augmentation_transforms() -> list[tuple[str, object]]:
         ("Resize short=640", T.ResizeShortestEdge([640], 1333, "choice")),
         ("Resize short=800", T.ResizeShortestEdge([800], 1333, "choice")),
         ("Resize short=1024", T.ResizeShortestEdge([1024], 1333, "choice")),
-        ("Brightness 1.15", T.RandomBrightness(1.15, 1.15)),
-        ("Contrast 1.10", T.RandomContrast(1.10, 1.10)),
-        ("Saturation 1.10", T.RandomSaturation(1.10, 1.10)),
-        ("Gamma 1.10", RandomGamma(1.10, 1.10)),
-        ("Gaussian blur 0.8", GaussianBlurTransform(0.80)),
-        ("JPEG quality 75", JpegCompressionTransform(75)),
+        ("Brightness 1.28", T.RandomBrightness(1.28, 1.28)),
+        ("Contrast 1.28", T.RandomContrast(1.28, 1.28)),
+        ("Saturation 1.28", T.RandomSaturation(1.28, 1.28)),
+        ("Gamma 1.20", RandomGamma(1.20, 1.20)),
+        ("Gaussian blur 1.75", GaussianBlurTransform(1.75)),
+        ("JPEG quality 55", JpegCompressionTransform(55)),
     ]
