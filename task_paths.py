@@ -24,6 +24,15 @@ def add_input_dir_arg(parser: argparse.ArgumentParser) -> None:
             "subdirectory matching the root name plus orth_detection_{train,test}.json."
         ),
     )
+    parser.add_argument(
+        "--image_subdir",
+        default="images",
+        help=(
+            "Image folder name used inside each sample. The COCO JSON keeps paths "
+            "such as <sample>/images/<view>.png; pass tooth_mask to read the "
+            "mirrored <sample>/tooth_mask/<view>.png files instead."
+        ),
+    )
 
 
 def resolve_task_paths(args: argparse.Namespace) -> argparse.Namespace:

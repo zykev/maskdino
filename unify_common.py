@@ -127,11 +127,29 @@ def load_categories(json_path: Path, task: str) -> list[str]:
     return category_names
 
 
-def resolve_image_path(data_dir: Path, file_name: str) -> str:
-    path = Path(file_name)
+def remap_image_subdir(path: Path, image_subdir: str) -> Path:
+    if image_subdir == "images":
+        return path
+
+    parts = list(path.parts)
+    try:
+        images_index = parts.index("images")
+    except ValueError:
+        return path
+
+    parts[images_index] = image_subdir
+    return Path(*parts)
+
+
+def resolve_image_path(
+    data_dir: Path,
+    file_name: str,
+    image_subdir: str = "images",
+) -> str:
+    path = remap_image_subdir(Path(file_name), image_subdir)
     if path.is_absolute() or path.exists():
         return str(path)
-    return str(data_dir / file_name)
+    return str(data_dir / path)
 
 
 def load_coco_dicts(
@@ -143,6 +161,7 @@ def load_coco_dicts(
     keep_negative_ratio: float,
     seed: int,
     log_label: str,
+    image_subdir: str = "images",
 ) -> list[dict]:
     if not 0.0 <= keep_negative_ratio <= 1.0:
         raise ValueError("--keep_negative_ratio must be between 0.0 and 1.0")
@@ -169,7 +188,11 @@ def load_coco_dicts(
             kept_negative_count += 1
 
         record = {
-            "file_name": resolve_image_path(data_dir, image_info["file_name"]),
+            "file_name": resolve_image_path(
+                data_dir,
+                image_info["file_name"],
+                image_subdir,
+            ),
             "image_id": image_id,
             "height": image_info["height"],
             "width": image_info["width"],
@@ -190,12 +213,14 @@ def load_coco_dicts(
 
     print(
         f"[{log_label}] loaded {len(dataset_dicts)} images from {json_path}; "
+        f"image_subdir={image_subdir}; "
         f"kept {kept_negative_count}/{negative_count} empty negative samples"
     )
     return dataset_dicts
 
 
 def register_datasets(args, class_names: list[str], *, include_masks: bool) -> None:
+    image_subdir = getattr(args, "image_subdir", "images")
     for split, json_path in {"train": args.train_json, "val": args.test_json}.items():
         dataset_name = f"{args.task}_{split}"
         if dataset_name in DatasetCatalog.list():
@@ -214,6 +239,7 @@ def register_datasets(args, class_names: list[str], *, include_masks: bool) -> N
                 keep_negative_ratio=args.keep_negative_ratio,
                 seed=args.seed,
                 log_label=dataset_name,
+                image_subdir=image_subdir,
             ),
         )
         MetadataCatalog.get(dataset_name).set(
