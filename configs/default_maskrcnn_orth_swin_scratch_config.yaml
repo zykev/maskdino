@@ -1,0 +1,38 @@
+_BASE_: default_maskrcnn_orth_config.yaml
+
+MODEL:
+  # No full detection checkpoint: every Mask R-CNN module starts from scratch.
+  WEIGHTS: ""
+  BACKBONE:
+    # This registered builder exposes Swin C2-C5 through Mask R-CNN P2-P6.
+    NAME: "build_swin_mae_fpn_backbone"
+    FREEZE_AT: 0
+    # The complete Swin image encoder starts from random initialization.
+    USE_PRETRAINED: false
+    PRETRAINED_FORMAT: "swin_mae"
+    PRETRAINED_WEIGHTS: ""
+    PRETRAINED_CHECKPOINT_KEY: "model"
+
+  SWIN:
+    PATCH_SIZE: 4
+    EMBED_DIM: 96
+    DEPTHS: [2, 2, 2, 2]
+    NUM_HEADS: [3, 6, 12, 24]
+    WINDOW_SIZE: 7
+    MLP_RATIO: 4.0
+    QKV_BIAS: true
+    DROP_RATE: 0.0
+    ATTN_DROP_RATE: 0.0
+    DROP_PATH_RATE: 0.1
+    PATCH_NORM: true
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+
+  # FPN consumes all four Swin stages: 1/4, 1/8, 1/16, and 1/32 scale.
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+    OUT_CHANNELS: 256
+
+WANDB:
+  NAME: "maskrcnn_orth_swin_scratch"
+
+OUTPUT_DIR: output/maskrcnn_orth_swin_scratch

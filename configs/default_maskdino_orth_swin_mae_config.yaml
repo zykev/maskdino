@@ -1,23 +1,13 @@
-_BASE_: default_maskdino_orth_base_config.yaml
+_BASE_: default_maskdino_orth_swin_scratch_config.yaml
 
 MODEL:
   BACKBONE:
-    NAME: "D2SwinMAEBackbone"
-  SWIN:
-    EMBED_DIM: 96
-    DEPTHS: [2, 2, 2, 2]
-    NUM_HEADS: [3, 6, 12, 24]
-    WINDOW_SIZE: 7
-    APE: False
-    DROP_PATH_RATE: 0.1
-    PATCH_NORM: True
-    PRETRAIN_IMG_SIZE: 224
-  # Set this to a Swin-MAE checkpoint when fine-tuning from MAE pretraining.
-  # Decoder/reconstruction weights are ignored by D2SwinMAEBackbone.
-  WEIGHTS: "/home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth"
-  MaskDINO:
-    SIZE_DIVISIBILITY: 224
-
+    # This switch is the only source of image-encoder initialization.
+    # MODEL.WEIGHTS remains reserved for a complete MaskDINO checkpoint.
+    USE_PRETRAINED: true
+    PRETRAINED_FORMAT: "swin_mae"
+    PRETRAINED_WEIGHTS: "/home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth"
+    PRETRAINED_CHECKPOINT_KEY: "model"
 WANDB:
   NAME: "maskdino_orth_swin_mae"
 

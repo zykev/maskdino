@@ -1,0 +1,14 @@
+_BASE_: default_maskrcnn_orth_swin_scratch_config.yaml
+
+MODEL:
+  BACKBONE:
+    # true: only patch_embed and Swin encoder stages are initialized from MAE.
+    USE_PRETRAINED: true
+    PRETRAINED_FORMAT: "swin_mae"
+    PRETRAINED_WEIGHTS: "/home/zychen/Documents/intraoral_code/Swin-MAE/exp/swinmae_v1/checkpoint-400.pth"
+    PRETRAINED_CHECKPOINT_KEY: "model"
+
+WANDB:
+  NAME: "maskrcnn_orth_swin_mae"
+
+OUTPUT_DIR: output/maskrcnn_orth_swin_mae

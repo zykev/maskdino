@@ -1,12 +1,138 @@
 # Copyright (c) IDEA, Inc. and its affiliates.
 from functools import partial
+import logging
+from collections.abc import Mapping
+from pathlib import Path
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from detectron2.layers import ShapeSpec
 from detectron2.modeling import BACKBONE_REGISTRY, Backbone
+from detectron2.modeling.backbone import FPN, LastLevelMaxPool
 
 from swin_unet import BasicBlock, PatchEmbedding
+
+
+def _extract_checkpoint_state_dict(checkpoint, checkpoint_key):
+    state_dict = checkpoint
+    if checkpoint_key:
+        for key in checkpoint_key.split("."):
+            if not isinstance(state_dict, Mapping) or key not in state_dict:
+                raise KeyError(
+                    f"Swin-MAE checkpoint does not contain configured key "
+                    f"{checkpoint_key!r}."
+                )
+            state_dict = state_dict[key]
+    if not isinstance(state_dict, Mapping):
+        raise TypeError(
+            "The configured Swin-MAE checkpoint entry must be a state dict, "
+            f"got {type(state_dict).__name__}."
+        )
+    return state_dict
+
+
+def _load_checkpoint(path):
+    """Load a trusted local training checkpoint across PyTorch versions."""
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        # ``weights_only`` was added in newer PyTorch versions.
+        return torch.load(path, map_location="cpu")
+    except Exception:
+        try:
+            return torch.load(path, map_location="cpu", weights_only=False)
+        except Exception as full_load_error:
+            raise RuntimeError(f"Unable to load Swin-MAE checkpoint: {path}") from full_load_error
+
+
+def load_swin_mae_pretrained_backbone(model, cfg):
+    """Initialize only ``D2SwinMAEBackbone`` from a Swin-MAE checkpoint.
+
+    This is intentionally separate from Detectron2's ``MODEL.WEIGHTS`` path:
+    the latter restores a complete detector, while this function only maps
+    patch embedding and hierarchical Swin encoder stages.
+    """
+    if not cfg.MODEL.BACKBONE.USE_PRETRAINED:
+        return
+    if cfg.MODEL.BACKBONE.PRETRAINED_FORMAT != "swin_mae":
+        raise ValueError(
+            "MODEL.BACKBONE.PRETRAINED_FORMAT must be 'swin_mae' for "
+            "D2SwinMAEBackbone."
+        )
+    if cfg.MODEL.BACKBONE.NAME not in {
+        "D2SwinMAEBackbone",
+        "build_swin_mae_fpn_backbone",
+    }:
+        raise ValueError(
+            "MODEL.BACKBONE.USE_PRETRAINED requires "
+            "a D2SwinMAEBackbone-based backbone."
+        )
+
+    checkpoint_path = Path(cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS).expanduser()
+    if not str(checkpoint_path) or not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            "MODEL.BACKBONE.USE_PRETRAINED is true, but "
+            "MODEL.BACKBONE.PRETRAINED_WEIGHTS is not a valid file: "
+            f"{checkpoint_path}"
+        )
+
+    detector_backbone = model.module.backbone if hasattr(model, "module") else model.backbone
+    backbone = getattr(detector_backbone, "bottom_up", detector_backbone)
+    if not isinstance(backbone, D2SwinMAEBackbone):
+        raise TypeError(
+            "Configured D2SwinMAEBackbone was not built; cannot load "
+            "Swin-MAE encoder weights."
+        )
+
+    checkpoint = _load_checkpoint(checkpoint_path)
+    source_state = _extract_checkpoint_state_dict(
+        checkpoint, cfg.MODEL.BACKBONE.PRETRAINED_CHECKPOINT_KEY
+    )
+    remapped = backbone.remap_swin_mae_encoder_state_dict(source_state)
+    target_state = backbone.state_dict()
+    compatible = {}
+    shape_mismatches = []
+    for key, value in remapped.items():
+        if key not in target_state:
+            continue
+        if target_state[key].shape != value.shape:
+            shape_mismatches.append((key, tuple(value.shape), tuple(target_state[key].shape)))
+            continue
+        compatible[key] = value
+
+    if shape_mismatches:
+        details = ", ".join(
+            f"{key}: checkpoint{source_shape} != model{target_shape}"
+            for key, source_shape, target_shape in shape_mismatches[:5]
+        )
+        raise ValueError(
+            "Swin-MAE encoder architecture does not match MODEL.SWIN. " + details
+        )
+
+    required_roots = ("patch_embed.",) + tuple(
+        f"layers.{index}." for index in range(backbone.num_layers)
+    )
+    missing_roots = [
+        root for root in required_roots if not any(key.startswith(root) for key in compatible)
+    ]
+    if missing_roots:
+        raise ValueError(
+            "Swin-MAE checkpoint did not provide all encoder stages: "
+            + ", ".join(missing_roots)
+        )
+
+    incompatible = backbone.load_state_dict(compatible, strict=False)
+    ignored_count = len(source_state) - len(remapped)
+    logging.getLogger("detectron2").info(
+        "Initialized Swin-MAE image encoder from %s: loaded %d tensors; "
+        "ignored %d MAE-only tensors; %d backbone tensors remain randomly initialized "
+        "(e.g. detection output norms).",
+        checkpoint_path,
+        len(compatible),
+        ignored_count,
+        len(incompatible.missing_keys),
+    )
 
 
 @BACKBONE_REGISTRY.register()
@@ -151,3 +277,33 @@ class D2SwinMAEBackbone(Backbone):
                     mapped_key = prefix + stripped
                     state_dict.setdefault(mapped_key, value)
                     break
+
+    def remap_swin_mae_encoder_state_dict(self, state_dict):
+        """Return only MAE encoder tensors, with checkpoint prefixes removed."""
+        source_prefixes = ("module.encoder.", "model.encoder.", "encoder.", "module.", "model.", "")
+        target_roots = ("patch_embed.", "layers.")
+        remapped = {}
+        for key, value in state_dict.items():
+            for source_prefix in source_prefixes:
+                if not key.startswith(source_prefix):
+                    continue
+                stripped = key[len(source_prefix):]
+                if stripped.startswith(target_roots):
+                    remapped.setdefault(stripped, value)
+                break
+        return remapped
+
+
+@BACKBONE_REGISTRY.register()
+def build_swin_mae_fpn_backbone(cfg, input_shape):
+    """Build a Mask R-CNN-ready FPN over all four Swin-MAE encoder stages."""
+    bottom_up = D2SwinMAEBackbone(cfg, input_shape)
+    in_features = cfg.MODEL.FPN.IN_FEATURES
+    return FPN(
+        bottom_up=bottom_up,
+        in_features=in_features,
+        out_channels=cfg.MODEL.FPN.OUT_CHANNELS,
+        norm=cfg.MODEL.FPN.NORM,
+        top_block=LastLevelMaxPool(),
+        fuse_type=getattr(cfg.MODEL.FPN, "FUSE_TYPE", "sum"),
+    )

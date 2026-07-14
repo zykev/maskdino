@@ -8,6 +8,37 @@ from datasets_coco.class_balance import add_class_balance_config
 from datasets_coco.orth_augmentations import add_orth_augmentation_config
 
 
+def add_swin_mae_backbone_config(cfg):
+    """Add the shared Swin-MAE image-encoder configuration.
+
+    ``MODEL.WEIGHTS`` deliberately remains reserved for a complete detection
+    checkpoint.  A Swin-MAE checkpoint initializes only the image encoder and
+    is controlled independently through ``MODEL.BACKBONE``.
+    """
+    cfg.MODEL.BACKBONE.USE_PRETRAINED = False
+    cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS = ""
+    cfg.MODEL.BACKBONE.PRETRAINED_FORMAT = "swin_mae"
+    cfg.MODEL.BACKBONE.PRETRAINED_CHECKPOINT_KEY = "model"
+
+    cfg.MODEL.SWIN = CN()
+    cfg.MODEL.SWIN.PRETRAIN_IMG_SIZE = 224
+    cfg.MODEL.SWIN.PATCH_SIZE = 4
+    cfg.MODEL.SWIN.EMBED_DIM = 96
+    cfg.MODEL.SWIN.DEPTHS = [2, 2, 6, 2]
+    cfg.MODEL.SWIN.NUM_HEADS = [3, 6, 12, 24]
+    cfg.MODEL.SWIN.WINDOW_SIZE = 7
+    cfg.MODEL.SWIN.MLP_RATIO = 4.0
+    cfg.MODEL.SWIN.QKV_BIAS = True
+    cfg.MODEL.SWIN.QK_SCALE = None
+    cfg.MODEL.SWIN.DROP_RATE = 0.0
+    cfg.MODEL.SWIN.ATTN_DROP_RATE = 0.0
+    cfg.MODEL.SWIN.DROP_PATH_RATE = 0.3
+    cfg.MODEL.SWIN.APE = False
+    cfg.MODEL.SWIN.PATCH_NORM = True
+    cfg.MODEL.SWIN.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
+    cfg.MODEL.SWIN.USE_CHECKPOINT = False
+
+
 def add_maskdino_config(cfg):
     """
     Add config for MaskDINO.
@@ -129,24 +160,7 @@ def add_maskdino_config(cfg):
     # the original paper.
     cfg.MODEL.MaskDINO.IMPORTANCE_SAMPLE_RATIO = 0.75
 
-    # swin transformer backbone
-    cfg.MODEL.SWIN = CN()
-    cfg.MODEL.SWIN.PRETRAIN_IMG_SIZE = 224
-    cfg.MODEL.SWIN.PATCH_SIZE = 4
-    cfg.MODEL.SWIN.EMBED_DIM = 96
-    cfg.MODEL.SWIN.DEPTHS = [2, 2, 6, 2]
-    cfg.MODEL.SWIN.NUM_HEADS = [3, 6, 12, 24]
-    cfg.MODEL.SWIN.WINDOW_SIZE = 7
-    cfg.MODEL.SWIN.MLP_RATIO = 4.0
-    cfg.MODEL.SWIN.QKV_BIAS = True
-    cfg.MODEL.SWIN.QK_SCALE = None
-    cfg.MODEL.SWIN.DROP_RATE = 0.0
-    cfg.MODEL.SWIN.ATTN_DROP_RATE = 0.0
-    cfg.MODEL.SWIN.DROP_PATH_RATE = 0.3
-    cfg.MODEL.SWIN.APE = False
-    cfg.MODEL.SWIN.PATCH_NORM = True
-    cfg.MODEL.SWIN.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
-    cfg.MODEL.SWIN.USE_CHECKPOINT = False
+    add_swin_mae_backbone_config(cfg)
 
     add_orth_augmentation_config(cfg)
 

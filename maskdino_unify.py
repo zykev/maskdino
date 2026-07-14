@@ -58,6 +58,7 @@ from maskdino import (
     MaskFormerSemanticDatasetMapper,
     add_maskdino_config,
 )
+from maskdino.modeling.backbone.swin_mae import load_swin_mae_pretrained_backbone
 from maskdino.utils import box_ops
 from unify_common import (
     ConciseMetricPrinter,
@@ -253,6 +254,13 @@ class Trainer(DefaultTrainer):
         self.cfg = cfg
 
         self.register_hooks(self.build_hooks())
+
+    def resume_or_load(self, resume=True):
+        # MODEL.WEIGHTS or a resume checkpoint restores a complete detector.
+        # Swin-MAE weights are only used for a genuinely new experiment.
+        if not (resume and self.checkpointer.has_checkpoint()) and not self.cfg.MODEL.WEIGHTS:
+            load_swin_mae_pretrained_backbone(self.model, self.cfg)
+        return super().resume_or_load(resume=resume)
 
     def build_hooks(self):
         hooks_list = super().build_hooks()

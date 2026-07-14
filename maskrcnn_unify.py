@@ -38,6 +38,8 @@ from datasets_coco.orth_augmentations import (
     build_orth_augmentations,
 )
 from task_paths import add_input_dir_arg, resolve_task_paths
+from maskdino.config import add_swin_mae_backbone_config
+from maskdino.modeling.backbone.swin_mae import load_swin_mae_pretrained_backbone
 from unify_common import (
     ConciseMetricPrinter,
     LossEvalHook,
@@ -135,6 +137,7 @@ def add_distributed_config(cfg) -> None:
 def _build_base_cfg():
     cfg = get_cfg()
     cfg.set_new_allowed(True)
+    add_swin_mae_backbone_config(cfg)
     add_class_balance_config(cfg)
     add_orth_augmentation_config(cfg)
     add_distributed_config(cfg)
@@ -297,8 +300,9 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
         cfg.MODEL.WEIGHTS = weights
     elif eval_only:
         cfg.MODEL.WEIGHTS = str(Path(cfg.OUTPUT_DIR) / "model_final.pth")
-    elif not cfg.MODEL.WEIGHTS:
-        cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
+    # An empty MODEL.WEIGHTS is intentional: it means a new detector.  The
+    # image encoder may still be initialized separately through
+    # MODEL.BACKBONE.USE_PRETRAINED.
     return cfg
 
 
@@ -318,6 +322,14 @@ class Trainer(DefaultTrainer):
         make_checkpointer_pointer_free(self.checkpointer)
         if getattr(cfg, "ORTH_CLASS_BALANCE", None) and cfg.ORTH_CLASS_BALANCE.ENABLED:
             configure_maskrcnn_class_balance(self.model, cfg)
+
+    def resume_or_load(self, resume=True):
+        # A complete detector checkpoint, whether resumed or specified through
+        # MODEL.WEIGHTS, owns the whole model. Otherwise initialize only the
+        # image encoder for a new experiment.
+        if not (resume and self.checkpointer.has_checkpoint()) and not self.cfg.MODEL.WEIGHTS:
+            load_swin_mae_pretrained_backbone(self.model, self.cfg)
+        return super().resume_or_load(resume=resume)
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):

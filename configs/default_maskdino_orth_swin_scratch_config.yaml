@@ -1,0 +1,28 @@
+_BASE_: default_maskdino_orth_base_config.yaml
+
+MODEL:
+  # MODEL.WEIGHTS is reserved for a complete MaskDINO checkpoint only.
+  WEIGHTS: ""
+  BACKBONE:
+    NAME: "D2SwinMAEBackbone"
+    # The full Swin image encoder is randomly initialized and trained from scratch.
+    USE_PRETRAINED: false
+    PRETRAINED_FORMAT: "swin_mae"
+    PRETRAINED_WEIGHTS: ""
+    PRETRAINED_CHECKPOINT_KEY: "model"
+  SWIN:
+    EMBED_DIM: 96
+    DEPTHS: [2, 2, 2, 2]
+    NUM_HEADS: [3, 6, 12, 24]
+    WINDOW_SIZE: 7
+    APE: false
+    DROP_PATH_RATE: 0.1
+    PATCH_NORM: true
+    PRETRAIN_IMG_SIZE: 224
+  MaskDINO:
+    SIZE_DIVISIBILITY: 224
+
+WANDB:
+  NAME: "maskdino_orth_swin_scratch"
+
+OUTPUT_DIR: output/maskdino_orth_swin_scratch
