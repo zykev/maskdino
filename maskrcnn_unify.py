@@ -240,9 +240,10 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg = _build_base_cfg()
     if args.config_file:
         cfg.merge_from_file(str(args.config_file))
-    cfg.DISTRIBUTED.NUM_GPUS = int(args.num_gpus)
-    if args.batch_size is not None:
-        cfg.DISTRIBUTED.IMS_PER_GPU = int(args.batch_size)
+    cfg.DISTRIBUTED.NUM_GPUS = int(getattr(args, "num_gpus", 1))
+    batch_size = getattr(args, "batch_size", None)
+    if batch_size is not None:
+        cfg.DISTRIBUTED.IMS_PER_GPU = int(batch_size)
 
     cfg.DATASETS.TRAIN = (f"{args.task}_train",)
     cfg.DATASETS.TEST = (f"{args.task}_val",)

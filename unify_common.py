@@ -62,10 +62,11 @@ def configure_distributed_solver(cfg, args, *, reference_global_batch: float) ->
     world_size = comm.get_world_size()
     num_gpus = int(cfg.DISTRIBUTED.NUM_GPUS)
     ims_per_gpu = int(cfg.DISTRIBUTED.IMS_PER_GPU)
-    expected_world_size = num_gpus * int(args.num_machines)
+    num_machines = int(getattr(args, "num_machines", 1))
+    expected_world_size = num_gpus * num_machines
     if world_size != expected_world_size:
         raise ValueError(
-            f"Configured {num_gpus} GPUs per machine across {args.num_machines} "
+            f"Configured {num_gpus} GPUs per machine across {num_machines} "
             f"machines, but the launched world size is {world_size}."
         )
 
