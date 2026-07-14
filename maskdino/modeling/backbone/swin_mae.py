@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from detectron2.layers import ShapeSpec
 from detectron2.modeling import BACKBONE_REGISTRY, Backbone
-from detectron2.modeling.backbone import FPN, LastLevelMaxPool
+from detectron2.modeling.backbone.fpn import FPN, LastLevelMaxPool
 
 from swin_unet import BasicBlock, PatchEmbedding
 
