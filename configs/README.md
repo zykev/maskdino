@@ -184,10 +184,12 @@ python scripts/smoke_ssl_backbones.py         # encoder-level shape contract
 * **`ORTH_CLASS_BALANCE.CLASS_WEIGHTS` 在所有 YAML 中都被有意省略。**
   两个入口都会从训练标注中重新计算它
   （`compute_effective_class_weights`），因为这些权重是逐数据集的类别频率。
-* **`ORTH_AUGMENTATION` 的取值范围必须保持同步**，即
-  `configs/maskrcnn/orth/_base.yaml` 与 `configs/maskdino/orth/_base.yaml`
-  之间要一致；拼图脚本 `datasets/orth_augmentations.py`
-  （`representative_augmentation_transforms`）是第三处镜像。
+* **`AUGMENTATION` 的每个任务策略必须保持同步。** `AUGMENTATION.CARIES`
+  与 `AUGMENTATION.ORTH` 各自在
+  `configs/maskrcnn/<task>/_base.yaml` 与 `configs/maskdino/<task>/_base.yaml`
+  之间逐项一致；拼图脚本 `datasets/augmentations.py`
+  （`representative_orth_augmentation_transforms`）是 orth 策略的第三处镜像。
+  入口按数据集名（`<task>_train`）自动选择对应策略，YAML 只需写自己任务的那一个节点。
 * **Checkpoint 使用绝对路径。** `SSL_WEIGHTS` 指向
   `maskdino/.checkpoints/pretrain/...`；它们不会相对配置文件解析。
 * **新增一个变体**意味着每个 `(detector, task)` 文件夹下都要新增一个文件，

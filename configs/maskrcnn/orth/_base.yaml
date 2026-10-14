@@ -51,26 +51,36 @@ ORTH_CLASS_BALANCE:
   FOCAL_GAMMA: 2.0
   BACKGROUND_WEIGHT: 1.0
 
-ORTH_AUGMENTATION:
-  ENABLED: true
-  HORIZONTAL_FLIP_PROB: 0.5
-  ROTATION_PROB: 0.3
-  ROTATION_ANGLE: 7.0
-  COLOR_PROB: 0.2
-  BRIGHTNESS_MIN: 0.85
-  BRIGHTNESS_MAX: 1.15
-  CONTRAST_MIN: 0.90
-  CONTRAST_MAX: 1.10
-  SATURATION_MIN: 0.90
-  SATURATION_MAX: 1.10
-  GAMMA_PROB: 0.2
-  GAMMA_MIN: 0.90
-  GAMMA_MAX: 1.10
-  QUALITY_PROB: 0.2
-  BLUR_SIGMA_MIN: 0.10
-  BLUR_SIGMA_MAX: 0.80
-  JPEG_QUALITY_MIN: 75
-  JPEG_QUALITY_MAX: 100
+# Unified downstream augmentation protocol (see
+# Docs/downstream_input_augmentation_protocol.md, section 5.2). Mask R-CNN and
+# MaskDINO share this exact conservative orth policy so the detector comparison
+# is not confounded by MaskDINO-only stronger colour, blur, compression or a
+# wider rotation range. Must stay in sync with
+# configs/maskdino/orth/_base.yaml; the montage mirror is
+# datasets/augmentations.representative_orth_augmentation_transforms.
+AUGMENTATION:
+  ORTH:
+    ENABLED: true
+    HORIZONTAL_FLIP_PROB: 0.5
+    ROTATION_PROB: 0.3
+    ROTATION_ANGLE: 7.0
+    BRIGHTNESS_PROB: 0.2
+    BRIGHTNESS_MIN: 0.85
+    BRIGHTNESS_MAX: 1.15
+    CONTRAST_PROB: 0.2
+    CONTRAST_MIN: 0.90
+    CONTRAST_MAX: 1.10
+    SATURATION_PROB: 0.2
+    SATURATION_MIN: 0.90
+    SATURATION_MAX: 1.10
+    GAMMA_PROB: 0.2
+    GAMMA_MIN: 0.90
+    GAMMA_MAX: 1.10
+    QUALITY_PROB: 0.2
+    BLUR_SIGMA_MIN: 0.10
+    BLUR_SIGMA_MAX: 0.80
+    JPEG_QUALITY_MIN: 75
+    JPEG_QUALITY_MAX: 100
 
 DISTRIBUTED:
   NUM_GPUS: 2

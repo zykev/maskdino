@@ -5,7 +5,7 @@
 # ------------------------------------------------------------------------
 from detectron2.config import CfgNode as CN
 from datasets.class_balance import add_class_balance_config
-from datasets.orth_augmentations import add_orth_augmentation_config
+from datasets.augmentations import add_augmentation_config
 
 
 def add_swin_mae_backbone_config(cfg):
@@ -220,7 +220,7 @@ def add_maskdino_config(cfg):
 
     add_ssl_backbone_config(cfg)
 
-    add_orth_augmentation_config(cfg)
+    add_augmentation_config(cfg)
 
     # Orthodontic detection class-balance options, left disabled by default
     # for other tasks. Only ENABLED/BETA/CLIP_MIN/CLIP_MAX/FOCAL_GAMMA/

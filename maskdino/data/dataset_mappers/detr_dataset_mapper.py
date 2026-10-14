@@ -9,7 +9,7 @@ from detectron2.data import detection_utils as utils
 from detectron2.data import transforms as T
 from detectron2.data.transforms import TransformGen
 from pycocotools import mask as coco_mask
-from datasets.orth_augmentations import build_orth_augmentations
+from datasets.augmentations import augmentation_enabled, build_augmentations
 __all__ = ["DetrDatasetMapper"]
 def convert_coco_poly_to_mask(segmentations, height, width):
     masks = []
@@ -72,9 +72,9 @@ class DetrDatasetMapper:
         if augmentations is not None:
             self.crop_gen = None
             self.tfm_gens = augmentations
-        elif hasattr(cfg, "ORTH_AUGMENTATION") and cfg.ORTH_AUGMENTATION.ENABLED:
+        elif augmentation_enabled(cfg):
             self.crop_gen = None
-            self.tfm_gens = build_orth_augmentations(cfg, is_train)
+            self.tfm_gens = build_augmentations(cfg, is_train)
         elif cfg.INPUT.CROP.ENABLED and is_train:
             self.crop_gen = [
                 T.ResizeShortestEdge([400, 500, 600], sample_style="choice"),

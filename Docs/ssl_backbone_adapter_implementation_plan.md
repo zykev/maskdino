@@ -465,7 +465,7 @@ configs/
 ```
 
 - `_base.yaml` 只描述 task + detector 超参（ROI heads、RPN、anchor、输入尺度、
-  dataloader、solver、`ORTH_AUGMENTATION`、`ORTH_CLASS_BALANCE` 等），**不包含
+  dataloader、solver、`AUGMENTATION`、`ORTH_CLASS_BALANCE` 等），**不包含
   任何 backbone 选择**，因此不能单独运行；每个 variant 以 `_BASE_: _base.yaml` 起始。
 - `<variant>.yaml` 只写 backbone block 与 `SWANLAB.NAME` / `OUTPUT_DIR`。其余全部继承，
   这正是五个 variant 构成受控对比的原因：数据、增强、solver、task head 完全一致，

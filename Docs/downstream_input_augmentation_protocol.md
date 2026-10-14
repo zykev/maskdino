@@ -100,27 +100,45 @@ INPUT:
 - 直接升至 DentMag high-resolution 的 `896` 不一定增加有效细节，却会显著增加显存和 ViT token 成本；
 - 训练短边 `[640, 800, 1024]` 提供足够的尺度扰动，且当前 Mask R-CNN / MaskDINO 都已使用该组设置。
 
-## 4. 统一 padding 与 encoder 兼容性
+## 4. padding 与 encoder 兼容性
 
-所有方法采用统一的 image-list padding divisibility：
+padding 必须满足每个编码器自身的整除约束，只向右侧和底部补零，不改变 resize
+后的有效图像内容或 bbox/mask 坐标：
 
-```text
-size_divisibility = 224
-```
-
-原因：
+| Backbone | 硬性整除要求 | 实际 `size_divisibility` |
+| --- | --- | --- |
+| ResNet / SimCLR | `res5` stride 32 | **32** |
+| Swin | `patch·window·2^(layers−1)` = 4·7·8 | 224 |
+| DINOv2 ViT | `lcm(patch 14, 32)` | 224 |
 
 ```text
 224 = lcm(DINOv2 patch size 14, detection pyramid stride 32)
 ```
 
-同时也兼容 Swin 的 patch/window 层次。统一 padding 只向右侧和底部补零，不改变 resize 后的有效图像内容或 bbox/mask 坐标。
+**最终决定：ResNet / SimCLR 保留原生 `32`，不抬到 `224`。** 理由：`32` 已完全满足
+ResNet 的整除需求（无窗口/patch 约束），抬到 `224` 只会让基线多补大量零、
+增加显存与算力却不增加任何有效信息。因此本项目的统一点是**每个 encoder 使用其
+最小合法 padding**，而非强行统一到同一个数值：ResNet 与 Swin/ViT 之间仍存在
+padding 粒度差异，但这是确定性的、由编码器契约决定、且不改变有效内容与坐标；
+它不属于“可被某个方法独占利用”的随机增强，故不影响方法间的公平比较。
 
-对 caries 的 `448` 测试输入，`448 / 14 = 32`，可以得到整齐的 DINOv2 token grid；对 orth，padding 后的长宽也可被 patch/window 安全整除。
+对 caries 的 `448` 测试输入，`448 / 14 = 32`，可以得到整齐的 DINOv2 token grid；
+对 orth，padding 后的长宽也可被 patch/window 安全整除。
 
-`size_divisibility=224` 会增加小图或长宽比极端图像的显存占用。因此训练日志必须记录：实际 padding 后 shape、每卡 batch size、峰值显存和有效像素占比。
+padding 粒度会影响小图或长宽比极端图像的显存占用（尤其 `224`）。因此训练日志
+必须记录：实际 padding 后 shape、每卡 batch size、峰值显存和有效像素占比。
 
 ## 5. 推荐训练 augmentation
+
+两条任务策略都挂在统一的 `AUGMENTATION` 节点下（`AUGMENTATION.CARIES` 与
+`AUGMENTATION.ORTH`），由 `datasets/augmentations.py` 的
+`add_augmentation_config` 注册。入口按任务（`cfg.ORTH_BBOX_ONLY` 或数据集名
+前缀）自动选取对应子节点，因此**同一份 YAML 可以同时被 caries / orth 脚本加载**：
+每个 `_base.yaml` 只写自己任务的那个子节点，另一任务回退到模块默认值。
+
+各子节点的键名按 transform 拆分了概率，例如亮度/对比度/饱和度/gamma 各自有
+`*_PROB`，因此 orth 的 `COLOR_PROB: 0.2` 现在展开为
+`BRIGHTNESS_PROB/CONTRAST_PROB/SATURATION_PROB = 0.2`。
 
 ### 5.1 caries augmentation
 
@@ -137,31 +155,57 @@ size_divisibility = 224
 
 水平翻转是否启用取决于 caries 类别是否表达解剖学左右关系；若标签仅表达病灶类型，通常可启用。该结论必须通过样本可视化与标签定义审计确认。
 
+主协议已把 caries 策略写进配置（`configs/{maskrcnn,maskdino}/caries/_base.yaml`
+的 `AUGMENTATION.CARIES`，两个检测器逐项一致）：
+
+```yaml
+AUGMENTATION:
+  CARIES:
+    ENABLED: true
+    HORIZONTAL_FLIP_PROB: 0.5
+    ROTATION_PROB: 0.2          # 绝对角度 ≤ 5°
+    ROTATION_ANGLE: 5.0
+    BRIGHTNESS_PROB: 0.2
+    BRIGHTNESS_MIN: 0.90
+    BRIGHTNESS_MAX: 1.10
+    CONTRAST_PROB: 0.2
+    CONTRAST_MIN: 0.90
+    CONTRAST_MAX: 1.10
+    SATURATION_PROB: 0.0        # 主协议关闭
+    GAMMA_PROB: 0.2
+    GAMMA_MIN: 0.90
+    GAMMA_MAX: 1.10
+    QUALITY_PROB: 0.0           # 模糊 / JPEG 也关闭
+```
+
 ### 5.2 orth augmentation
 
 为避免当前 MaskDINO 比 Mask R-CNN 接受更强 augmentation，主协议统一采用较保守的 orth 设置：
 
 ```yaml
-ORTH_AUGMENTATION:
-  ENABLED: true
-  HORIZONTAL_FLIP_PROB: 0.5
-  ROTATION_PROB: 0.3
-  ROTATION_ANGLE: 7.0
-  COLOR_PROB: 0.2
-  BRIGHTNESS_MIN: 0.85
-  BRIGHTNESS_MAX: 1.15
-  CONTRAST_MIN: 0.90
-  CONTRAST_MAX: 1.10
-  SATURATION_MIN: 0.90
-  SATURATION_MAX: 1.10
-  GAMMA_PROB: 0.2
-  GAMMA_MIN: 0.90
-  GAMMA_MAX: 1.10
-  QUALITY_PROB: 0.2
-  BLUR_SIGMA_MIN: 0.10
-  BLUR_SIGMA_MAX: 0.80
-  JPEG_QUALITY_MIN: 75
-  JPEG_QUALITY_MAX: 100
+AUGMENTATION:
+  ORTH:
+    ENABLED: true
+    HORIZONTAL_FLIP_PROB: 0.5
+    ROTATION_PROB: 0.3
+    ROTATION_ANGLE: 7.0
+    BRIGHTNESS_PROB: 0.2
+    BRIGHTNESS_MIN: 0.85
+    BRIGHTNESS_MAX: 1.15
+    CONTRAST_PROB: 0.2
+    CONTRAST_MIN: 0.90
+    CONTRAST_MAX: 1.10
+    SATURATION_PROB: 0.2
+    SATURATION_MIN: 0.90
+    SATURATION_MAX: 1.10
+    GAMMA_PROB: 0.2
+    GAMMA_MIN: 0.90
+    GAMMA_MAX: 1.10
+    QUALITY_PROB: 0.2
+    BLUR_SIGMA_MIN: 0.10
+    BLUR_SIGMA_MAX: 0.80
+    JPEG_QUALITY_MIN: 75
+    JPEG_QUALITY_MAX: 100
 ```
 
 该设置来自当前较保守的 Mask R-CNN orth 配置。它应同时用于 MaskDINO，使检测器间的性能差异不来自 MaskDINO 独占的更强颜色、模糊、压缩或更大旋转范围。

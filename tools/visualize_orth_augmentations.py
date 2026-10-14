@@ -27,7 +27,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 # fmt: on
 
-from datasets.orth_augmentations import representative_augmentation_transforms
+from datasets.augmentations import representative_orth_augmentation_transforms
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -213,7 +213,7 @@ def create_montage(
     tile_width: int,
     tile_height: int,
 ) -> None:
-    strategies = [("Original", None)] + representative_augmentation_transforms()
+    strategies = [("Original", None)] + representative_orth_augmentation_transforms()
     label_width = 190
     header_height = 42
     montage = Image.new(

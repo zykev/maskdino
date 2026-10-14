@@ -53,21 +53,54 @@ MODEL:
       INSTANCE_ON: True
       PANOPTIC_ON: False
 
+# Unified downstream input protocol (see
+# Docs/downstream_input_augmentation_protocol.md, section 3.1): every SSL
+# method uses the same caries geometry. 448 = 14 x 32 aligns the shortest
+# test edge with the DINOv2 ViT/14 token grid and the 32x detection stride;
+# the 672 cap keeps the longest edge bounded after padding. Must stay in sync
+# with configs/maskrcnn/caries/_base.yaml.
 INPUT:
   DATASET_MAPPER_NAME: coco_instance_detr
   MIN_SIZE_TRAIN:
-  - 300
+  - 352
   - 400
-  - 500
-  MAX_SIZE_TRAIN: 600
-  MIN_SIZE_TEST: 400
-  MAX_SIZE_TEST: 600
+  - 448
+  MIN_SIZE_TRAIN_SAMPLING: choice
+  MAX_SIZE_TRAIN: 672
+  MIN_SIZE_TEST: 448
+  MAX_SIZE_TEST: 672
   MASK_FORMAT: polygon
 
 DATALOADER:
   NUM_WORKERS: 4
   REPEAT_THRESHOLD: 0.05
   KEEP_NEGATIVE_RATIO: 0.1
+
+# Unified downstream augmentation protocol (see
+# Docs/downstream_input_augmentation_protocol.md, section 5.1). Mask R-CNN and
+# MaskDINO share this caries policy, and it is identical for every SSL method:
+# horizontal flip, mild small-angle rotation and mild brightness/contrast/gamma.
+# Cropping, saturation, blur and JPEG compression stay closed so the fine lesion
+# texture that defines the mask boundary is protected. Must stay in sync with
+# configs/maskrcnn/caries/_base.yaml. Unset keys keep the module defaults.
+AUGMENTATION:
+  CARIES:
+    ENABLED: true
+    HORIZONTAL_FLIP_PROB: 0.5
+    ROTATION_PROB: 0.2
+    ROTATION_ANGLE: 5.0
+    BRIGHTNESS_PROB: 0.2
+    BRIGHTNESS_MIN: 0.90
+    BRIGHTNESS_MAX: 1.10
+    CONTRAST_PROB: 0.2
+    CONTRAST_MIN: 0.90
+    CONTRAST_MAX: 1.10
+    # Protocol 5.1 keeps saturation, blur and JPEG off for caries.
+    SATURATION_PROB: 0.0
+    GAMMA_PROB: 0.2
+    GAMMA_MIN: 0.90
+    GAMMA_MAX: 1.10
+    QUALITY_PROB: 0.0
 
 DISTRIBUTED:
   NUM_GPUS: 2

@@ -33,9 +33,10 @@ import detectron2.utils.comm as comm
 import torch.nn.functional as F
 
 from datasets.class_balance import add_class_balance_config, compute_effective_class_weights
-from datasets.orth_augmentations import (
-    add_orth_augmentation_config,
-    build_orth_augmentations,
+from datasets.augmentations import (
+    add_augmentation_config,
+    augmentation_enabled,
+    build_augmentations,
 )
 from utils.task_paths import add_input_dir_arg, resolve_task_paths
 from maskdino.config import add_ssl_backbone_config, add_swin_mae_backbone_config
@@ -157,7 +158,7 @@ def _build_base_cfg():
     add_swin_mae_backbone_config(cfg)
     add_ssl_backbone_config(cfg)
     add_class_balance_config(cfg)
-    add_orth_augmentation_config(cfg)
+    add_augmentation_config(cfg)
     add_distributed_config(cfg)
     cfg.DATALOADER.KEEP_NEGATIVE_RATIO = 0.5
     cfg.merge_from_file(
@@ -267,6 +268,8 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
     cfg.DATASETS.TEST = (f"{args.task}_val",)
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
     cfg.MODEL.MASK_ON = args.task == "caries"
+    # Authoritative task signal for datasets.augmentations._infer_task.
+    cfg.ORTH_BBOX_ONLY = args.task == "orth"
 
     num_workers = getattr(args, "num_workers", None)
     repeat_threshold = getattr(args, "repeat_threshold", None)
@@ -363,12 +366,12 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_train_loader(cls, cfg):
-        if not cfg.ORTH_AUGMENTATION.ENABLED:
+        if not augmentation_enabled(cfg):
             return super().build_train_loader(cfg)
         mapper = DatasetMapper(
             cfg,
             is_train=True,
-            augmentations=build_orth_augmentations(cfg, is_train=True),
+            augmentations=build_augmentations(cfg, is_train=True),
         )
         return build_detection_train_loader(cfg, mapper=mapper)
 
@@ -378,11 +381,11 @@ class Trainer(DefaultTrainer):
         for hook in hooks_list:
             if isinstance(hook, d2_hooks.PeriodicWriter) and hasattr(hook, "_period"):
                 hook._period = log_period
-        if self.cfg.ORTH_AUGMENTATION.ENABLED:
+        if augmentation_enabled(self.cfg):
             val_mapper = DatasetMapper(
                 self.cfg,
                 is_train=True,
-                augmentations=build_orth_augmentations(self.cfg, is_train=False),
+                augmentations=build_augmentations(self.cfg, is_train=False),
             )
         else:
             val_mapper = DatasetMapper(self.cfg, is_train=True)

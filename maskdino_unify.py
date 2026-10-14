@@ -49,7 +49,7 @@ from detectron2.utils.events import JSONWriter, TensorboardXWriter
 from detectron2.utils.logger import setup_logger
 
 from datasets.class_balance import compute_effective_class_weights
-from datasets.orth_augmentations import build_orth_augmentations
+from datasets.augmentations import augmentation_enabled, build_augmentations
 from utils.task_paths import add_input_dir_arg, resolve_task_paths
 from maskdino import (
     COCOInstanceNewBaselineDatasetMapper,
@@ -343,8 +343,8 @@ class Trainer(DefaultTrainer):
     def build_loss_loader(cls, cfg):
         # Keep is_train=True so the mapper yields annotations needed to compute losses.
         augmentations = None
-        if cfg.ORTH_AUGMENTATION.ENABLED:
-            augmentations = build_orth_augmentations(cfg, is_train=False)
+        if augmentation_enabled(cfg):
+            augmentations = build_augmentations(cfg, is_train=False)
         return build_detection_test_loader(
             cfg,
             cfg.DATASETS.TEST[0],

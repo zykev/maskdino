@@ -129,7 +129,7 @@ Everything else is importable:
 |---|---|
 | `maskdino/` | the MaskDINO package; `maskdino/modeling/backbone/` holds the SSL adapters (`swin_ssl_backbone`, `resnet_ssl_backbone`, `vit_ssl_backbone`), the shared checkpoint helpers (`ssl_common`) and the Swin building blocks they share (`swin_unet`) |
 | `utils/` | project-wide helpers: `task_paths` (dataset path resolution) and `unify_common` (trainer hooks, dataset registration, evaluation panels) |
-| `datasets/` | this project's annotation pipeline: `caries_to_coco` / `caries_coco_split` (caries teeth), `orth_to_coco` / `orth_coco_split` (orthodontics), plus `orth_augmentations`, `class_balance`, and the one-off `migrate_to_images_anno_layout` |
+| `datasets/` | this project's annotation pipeline: `caries_to_coco` / `caries_coco_split` (caries teeth), `orth_to_coco` / `orth_coco_split` (orthodontics), plus `augmentations` (per-task caries/orth policies), `class_balance`, and the one-off `migrate_to_images_anno_layout` |
 | `datasets_coco/` | *(upstream, unused here)* ADE20K / COCO-panoptic annotation preparation, kept only for reference |
 | `tools/` | standalone CLI utilities (`analyze_orth_geometry`, `analyze_orth_test_annotations`, `sample_stat`, `visualize_orth_augmentations`, `build_tooth_guidance`, `sam`, weight converters) |
 | `scripts/` | `train_*.sh` / `eval_*.sh` launchers and the validation / smoke-test scripts |
