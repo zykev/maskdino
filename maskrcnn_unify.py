@@ -32,19 +32,20 @@ from detectron2.utils.logger import setup_logger
 import detectron2.utils.comm as comm
 import torch.nn.functional as F
 
-from datasets_coco.class_balance import add_class_balance_config, compute_effective_class_weights
-from datasets_coco.orth_augmentations import (
+from datasets.class_balance import add_class_balance_config, compute_effective_class_weights
+from datasets.orth_augmentations import (
     add_orth_augmentation_config,
     build_orth_augmentations,
 )
-from task_paths import add_input_dir_arg, resolve_task_paths
-from maskdino.config import add_swin_mae_backbone_config
+from utils.task_paths import add_input_dir_arg, resolve_task_paths
+from maskdino.config import add_ssl_backbone_config, add_swin_mae_backbone_config
+from maskdino.modeling.backbone.ssl_common import load_ssl_pretrained_backbone
 from maskdino.modeling.backbone.swin_mae import load_swin_mae_pretrained_backbone
-from unify_common import (
+from utils.unify_common import (
     ConciseMetricPrinter,
     LossEvalHook,
+    SwanLabWriter,
     TqdmHook,
-    WandbWriter,
     add_panel_title,
     configure_distributed_solver,
     count_visible_gpus,
@@ -86,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dist_url", default=None)
     add_input_dir_arg(parser)
     parser.add_argument("--output_dir", default=None, type=Path)
-    parser.add_argument("--wandb_name", default=None, help="Override WANDB.NAME from the config.")
+    parser.add_argument("--swanlab_name", default=None, help="Override SWANLAB.NAME from the config.")
     parser.add_argument("--weights", default="", help="Optional checkpoint for resume/eval.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
@@ -119,12 +120,28 @@ def parse_args() -> argparse.Namespace:
 
 
 def default_paths(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill in ``--config_file`` from the organised config tree.
+
+    Plain ``Path("configs/...")`` is relative to the current working directory,
+    which made the default unusable from anywhere but the repository root. The
+    lookup is now anchored on the repository (the parent of this module) and the
+    default config is the ``no_ssl`` (ImageNet/COCO-initialised) control, so the
+    SSL variants are always an explicit opt-in.
+    """
+    repo_root = Path(__file__).resolve().parent
     config_file = getattr(args, "config_file", None)
     resolve_task_paths(args)
-    if args.task == "caries":
-        args.config_file = config_file or Path("configs/default_maskrcnn_caries_config.yaml")
+    task = "caries" if args.task == "caries" else "orth"
+    default = repo_root / "configs" / "maskrcnn" / task / "no_ssl.yaml"
+    if config_file:
+        resolved = Path(config_file).expanduser()
+        args.config_file = resolved if resolved.is_absolute() else (Path.cwd() / resolved)
     else:
-        args.config_file = config_file or Path("configs/default_maskrcnn_orth_config.yaml")
+        args.config_file = default
+    if not Path(args.config_file).is_file():
+        raise FileNotFoundError(
+            f"Config file not found: {args.config_file} (task={args.task})."
+        )
     return args
 
 
@@ -138,6 +155,7 @@ def _build_base_cfg():
     cfg = get_cfg()
     cfg.set_new_allowed(True)
     add_swin_mae_backbone_config(cfg)
+    add_ssl_backbone_config(cfg)
     add_class_balance_config(cfg)
     add_orth_augmentation_config(cfg)
     add_distributed_config(cfg)
@@ -281,8 +299,8 @@ def build_cfg(args: argparse.Namespace, num_classes: int):
         cfg.TEST.EVAL_PERIOD = eval_period
     if args.output_dir is not None:
         cfg.OUTPUT_DIR = str(args.output_dir)
-    if getattr(args, "wandb_name", None) is not None:
-        cfg.WANDB.NAME = args.wandb_name
+    if getattr(args, "swanlab_name", None) is not None:
+        cfg.SWANLAB.NAME = args.swanlab_name
     cfg.TRAIN_LOG_PERIOD = getattr(args, "log_period", 100)
     cfg.TRAIN_TQDM = not getattr(args, "no_tqdm", False)
     cfg.SAVE_RAW_PREDICTIONS = getattr(args, "save_raw_predictions", False)
@@ -329,6 +347,11 @@ class Trainer(DefaultTrainer):
         # MODEL.WEIGHTS, owns the whole model. Otherwise initialize only the
         # image encoder for a new experiment.
         if not (resume and self.checkpointer.has_checkpoint()) and not self.cfg.MODEL.WEIGHTS:
+            # New unified path (SSL_METHOD + *_ssl_backbone builders). It is a
+            # no-op for configs that do not opt in.
+            load_ssl_pretrained_backbone(self.model, self.cfg)
+            # Legacy Swin-MAE path for the native D2SwinMAEBackbone; a no-op
+            # unless MODEL.BACKBONE.USE_PRETRAINED is set.
             load_swin_mae_pretrained_backbone(self.model, self.cfg)
         return super().resume_or_load(resume=resume)
 
@@ -383,8 +406,8 @@ class Trainer(DefaultTrainer):
             ConciseMetricPrinter(self.max_iter, metric_names),
             JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
         ]
-        if getattr(self.cfg, "LOGGER", "tensorboard") == "wandb":
-            writers.append(WandbWriter(self.cfg))
+        if getattr(self.cfg, "LOGGER", "tensorboard") == "swanlab":
+            writers.append(SwanLabWriter(self.cfg))
         else:
             writers.append(TensorboardXWriter(self.cfg.OUTPUT_DIR))
         return writers

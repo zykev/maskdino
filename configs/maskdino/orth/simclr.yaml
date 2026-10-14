@@ -1,0 +1,32 @@
+# SimCLRv2 ResNet-50 (sk_ratio=0.0625) image encoder.
+#
+# Same architecture as `no_ssl` (ResNet-50 C2-C5), so this isolates the effect
+# of the SimCLRv2 pretraining. MODEL.WEIGHTS stays empty: only the encoder is
+# restored and MaskDINO keeps its random transformer init.
+_BASE_: _base.yaml
+
+MODEL:
+  WEIGHTS: ""
+  BACKBONE:
+    NAME: "build_resnet_ssl_backbone"
+    SSL_METHOD: "simclr"
+    USE_SSL_PRETRAINED: true
+    SSL_WEIGHTS: "/home/zychen/Documents/intraoral_code/maskdino/.checkpoints/pretrain/simclr/resnet50_checkpoint-050.pth"
+    # Dotted path of the encoder inside the checkpoint; the loader falls back
+    # to auto-detection (with a warning) if this key does not resolve.
+    SSL_CHECKPOINT_KEY: "model.backbone"
+    SSL_STRICT_LOAD: true
+    FREEZE_AT: 0
+    FEATURE_NAMES: ["res2", "res3", "res4", "res5"]
+  RESNET_SSL:
+    DEPTH: 50
+    WIDTH_MULTIPLIER: 1
+    STEM_TYPE: "simclrv2"
+    SK_RATIO: 0.0625
+  MaskDINO:
+    SIZE_DIVISIBILITY: 32
+
+SWANLAB:
+  NAME: "maskdino_orth_simclr"
+
+OUTPUT_DIR: output/maskdino_orth_simclr

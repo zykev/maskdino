@@ -1,0 +1,42 @@
+# DINOv2 ViT-S/14 encoder.
+#
+# A ViT is a plain token sequence, so `ViTSSLBackbone` builds the four pyramid
+# levels from blocks 3/6/9/12 and then resamples each level to the canonical
+# 1/4, 1/8, 1/16, 1/32 grid. The token grid is taken from the real feature map
+# (never from sqrt(num_tokens)) so rectangular inputs stay correct.
+_BASE_: _base.yaml
+
+MODEL:
+  WEIGHTS: ""
+  BACKBONE:
+    NAME: "build_vit_ssl_fpn_backbone"
+    SSL_METHOD: "dinov2"
+    USE_SSL_PRETRAINED: true
+    SSL_WEIGHTS: "/home/zychen/Documents/intraoral_code/maskdino/.checkpoints/pretrain/dinov2/dinov2_vits_train249999_teacher_checkpoint.pth"
+    # The teacher encoder is the frozen/EMA copy; `dino_head.*` is dropped by
+    # the shared loader before the `teacher.` prefix is stripped.
+    SSL_CHECKPOINT_KEY: "teacher"
+    SSL_STRICT_LOAD: true
+    FREEZE_AT: 0
+    FEATURE_NAMES: ["res2", "res3", "res4", "res5"]
+  VIT_SSL:
+    ARCH: "dinov2_vits14"
+    PATCH_SIZE: 14
+    EMBED_DIM: 384
+    DEPTH: 12
+    NUM_HEADS: 6
+    NUM_REGISTER_TOKENS: 0
+    # 1-indexed: collect after blocks 3, 6, 9 and 12.
+    OUT_BLOCKS: [3, 6, 9, 12]
+    PYRAMID_CHANNELS: 256
+    PYRAMID_NORM: "LN"
+    # Training resolution of the checkpoint pos_embed (32x32 patch grid at p14).
+    IMG_SIZE: 448
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+    OUT_CHANNELS: 256
+
+SWANLAB:
+  NAME: "maskrcnn_caries_dinov2"
+
+OUTPUT_DIR: output/maskrcnn_caries_dinov2

@@ -1,0 +1,37 @@
+# Swin-MAE baseline encoder (Swin-Small, ImageNet-1k MAE).
+#
+# The Swin encoder is hierarchical and emits res2-res5 directly at 1/4, 1/8,
+# 1/16 and 1/32, so MaskDINO consumes it as-is. The checkpoint carries a
+# learned absolute positional table (`POSITION_ENCODING: "native_fixed"`),
+# which the backbone installs at its native grid and resamples per input size.
+_BASE_: _base.yaml
+
+MODEL:
+  WEIGHTS: ""
+  BACKBONE:
+    NAME: "build_swin_ssl_backbone"
+    SSL_METHOD: "swinmae"
+    USE_SSL_PRETRAINED: true
+    SSL_WEIGHTS: "/home/zychen/Documents/intraoral_code/maskdino/.checkpoints/pretrain/swinmae/swins_checkpoint-50.pth"
+    SSL_CHECKPOINT_KEY: "model"
+    SSL_STRICT_LOAD: true
+    FREEZE_AT: 0
+    FEATURE_NAMES: ["res2", "res3", "res4", "res5"]
+  SWIN_SSL:
+    EMBED_DIM: 96
+    DEPTHS: [2, 2, 18, 2]
+    NUM_HEADS: [3, 6, 12, 24]
+    PATCH_SIZE: 4
+    WINDOW_SIZE: 7
+    # Resolution of the pretrained absolute table. The real grid is derived
+    # from the input at forward time, so this only sets the fallback.
+    IMG_SIZE: 224
+    POSITION_ENCODING: "native_fixed"
+  MaskDINO:
+    # patch_size * 2^(num_layers-1) * window_size = 4 * 8 * 7.
+    SIZE_DIVISIBILITY: 224
+
+SWANLAB:
+  NAME: "maskdino_orth_swinmae"
+
+OUTPUT_DIR: output/maskdino_orth_swinmae

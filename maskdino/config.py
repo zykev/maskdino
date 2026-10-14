@@ -4,8 +4,8 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 from detectron2.config import CfgNode as CN
-from datasets_coco.class_balance import add_class_balance_config
-from datasets_coco.orth_augmentations import add_orth_augmentation_config
+from datasets.class_balance import add_class_balance_config
+from datasets.orth_augmentations import add_orth_augmentation_config
 
 
 def add_swin_mae_backbone_config(cfg):
@@ -24,7 +24,7 @@ def add_swin_mae_backbone_config(cfg):
     cfg.MODEL.SWIN.PRETRAIN_IMG_SIZE = 224
     cfg.MODEL.SWIN.PATCH_SIZE = 4
     cfg.MODEL.SWIN.EMBED_DIM = 96
-    cfg.MODEL.SWIN.DEPTHS = [2, 2, 6, 2]
+    cfg.MODEL.SWIN.DEPTHS = [2, 2, 18, 2]
     cfg.MODEL.SWIN.NUM_HEADS = [3, 6, 12, 24]
     cfg.MODEL.SWIN.WINDOW_SIZE = 7
     cfg.MODEL.SWIN.MLP_RATIO = 4.0
@@ -37,6 +37,62 @@ def add_swin_mae_backbone_config(cfg):
     cfg.MODEL.SWIN.PATCH_NORM = True
     cfg.MODEL.SWIN.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
     cfg.MODEL.SWIN.USE_CHECKPOINT = False
+
+
+def add_ssl_backbone_config(cfg):
+    """Add the family-agnostic SSL backbone configuration."""
+    cfg.MODEL.BACKBONE.SSL_METHOD = "none"
+    cfg.MODEL.BACKBONE.USE_SSL_PRETRAINED = False
+    cfg.MODEL.BACKBONE.SSL_WEIGHTS = ""
+    cfg.MODEL.BACKBONE.SSL_CHECKPOINT_KEY = ""
+    cfg.MODEL.BACKBONE.SSL_STRICT_LOAD = True
+    cfg.MODEL.BACKBONE.FREEZE_AT = 0
+    cfg.MODEL.BACKBONE.FEATURE_NAMES = ["res2", "res3", "res4", "res5"]
+
+    # Swin family. Empty/zero sentinels mean "not configured", so the legacy
+    # MODEL.SWIN node keeps working when only SSL_METHOD/PATCH_SIZE is overridden.
+    cfg.MODEL.SWIN_SSL = CN()
+    cfg.MODEL.SWIN_SSL.EMBED_DIM = 0
+    cfg.MODEL.SWIN_SSL.DEPTHS = []
+    cfg.MODEL.SWIN_SSL.NUM_HEADS = []
+    cfg.MODEL.SWIN_SSL.PATCH_SIZE = 0
+    cfg.MODEL.SWIN_SSL.WINDOW_SIZE = 0
+    cfg.MODEL.SWIN_SSL.MLP_RATIO = 4.0
+    cfg.MODEL.SWIN_SSL.QKV_BIAS = True
+    cfg.MODEL.SWIN_SSL.DROP_RATE = 0.0
+    cfg.MODEL.SWIN_SSL.ATTN_DROP_RATE = 0.0
+    cfg.MODEL.SWIN_SSL.DROP_PATH_RATE = 0.0
+    cfg.MODEL.SWIN_SSL.PATCH_NORM = True
+    # "" means "derive from SSL_METHOD": swinmae -> "native_fixed" (the learned
+    # absolute table of the Swin-MAE encoder), dentmag_swin -> "dentmag_sincos".
+    # Explicit values: none | native_fixed | dentmag_sincos.
+    cfg.MODEL.SWIN_SSL.POSITION_ENCODING = ""
+    # Input resolution the native_fixed table defaults to when no checkpoint
+    # supplies one (the table is resampled to the real grid at forward time).
+    cfg.MODEL.SWIN_SSL.IMG_SIZE = 224
+
+    # SimCLRv2 ResNet family.
+    cfg.MODEL.RESNET_SSL = CN()
+    cfg.MODEL.RESNET_SSL.DEPTH = 0  # 0 -> fall back to MODEL.RESNETS.DEPTH
+    cfg.MODEL.RESNET_SSL.WIDTH_MULTIPLIER = 1
+    cfg.MODEL.RESNET_SSL.STEM_TYPE = "simclrv2"
+    cfg.MODEL.RESNET_SSL.SK_RATIO = 0.0625
+
+    # ViT family (DINOv2 / ViT-MAE / DentMaG-ViT).
+    cfg.MODEL.VIT_SSL = CN()
+    cfg.MODEL.VIT_SSL.ARCH = ""  # vit_tiny|vit_small|vit_base|vit_large|dinov2_vits14|...
+    cfg.MODEL.VIT_SSL.PATCH_SIZE = 0
+    cfg.MODEL.VIT_SSL.EMBED_DIM = 0
+    cfg.MODEL.VIT_SSL.DEPTH = 0
+    cfg.MODEL.VIT_SSL.NUM_HEADS = 0
+    cfg.MODEL.VIT_SSL.NUM_REGISTER_TOKENS = 0
+    cfg.MODEL.VIT_SSL.OUT_BLOCKS = [3, 6, 9, 12]
+    cfg.MODEL.VIT_SSL.PYRAMID_CHANNELS = 256
+    cfg.MODEL.VIT_SSL.PYRAMID_NORM = "LN"
+    cfg.MODEL.VIT_SSL.PYRAMID_SMOOTHING = False
+    # Resolution the checkpoint's pos_embed was trained with; only used to size
+    # the placeholder parameter before the checkpoint is loaded.
+    cfg.MODEL.VIT_SSL.IMG_SIZE = 448
 
 
 def add_maskdino_config(cfg):
@@ -161,6 +217,8 @@ def add_maskdino_config(cfg):
     cfg.MODEL.MaskDINO.IMPORTANCE_SAMPLE_RATIO = 0.75
 
     add_swin_mae_backbone_config(cfg)
+
+    add_ssl_backbone_config(cfg)
 
     add_orth_augmentation_config(cfg)
 

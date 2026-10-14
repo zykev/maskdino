@@ -48,9 +48,9 @@ from detectron2.utils.env import seed_all_rng
 from detectron2.utils.events import JSONWriter, TensorboardXWriter
 from detectron2.utils.logger import setup_logger
 
-from datasets_coco.class_balance import compute_effective_class_weights
-from datasets_coco.orth_augmentations import build_orth_augmentations
-from task_paths import add_input_dir_arg, resolve_task_paths
+from datasets.class_balance import compute_effective_class_weights
+from datasets.orth_augmentations import build_orth_augmentations
+from utils.task_paths import add_input_dir_arg, resolve_task_paths
 from maskdino import (
     COCOInstanceNewBaselineDatasetMapper,
     COCOPanopticNewBaselineDatasetMapper,
@@ -58,14 +58,15 @@ from maskdino import (
     MaskFormerSemanticDatasetMapper,
     add_maskdino_config,
 )
+from maskdino.modeling.backbone.ssl_common import load_ssl_pretrained_backbone
 from maskdino.modeling.backbone.swin_mae import load_swin_mae_pretrained_backbone
 from maskdino.utils import box_ops
-from unify_common import (
+from utils.unify_common import (
     ConciseMetricPrinter,
     LossEvalHook,
     PointerFreeDetectionCheckpointer,
+    SwanLabWriter,
     TqdmHook,
-    WandbWriter,
     add_panel_title,
     configure_distributed_solver,
     count_visible_gpus,
@@ -113,7 +114,7 @@ def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     add_input_dir_arg(parser)
     parser.add_argument("--output_dir", default=None, type=Path)
-    parser.add_argument("--wandb_name", default=None, help="Override WANDB.NAME from the config.")
+    parser.add_argument("--swanlab_name", default=None, help="Override SWANLAB.NAME from the config.")
     parser.add_argument("--keep_negative_ratio", default=None, type=float)
     parser.add_argument("--repeat_threshold", default=None, type=float)
     parser.add_argument(
@@ -133,14 +134,26 @@ def add_task_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 
 def apply_default_paths(args) -> None:
+    """Fill in ``--config_file`` from the organised config tree.
+
+    The default is resolved against the repository (the parent of this module)
+    rather than the current working directory, and points at the ``no_ssl``
+    (ImageNet/COCO-initialised) control so that every SSL variant is an explicit
+    opt-in.
+    """
+    repo_root = Path(__file__).resolve().parent
     config_file = getattr(args, "config_file", None)
     resolve_task_paths(args)
-    if args.task == "caries":
-        if not config_file:
-            args.config_file = "configs/default_maskdino_caries_config.yaml"
+    task = "caries" if args.task == "caries" else "orth"
+    if config_file:
+        resolved = Path(config_file).expanduser()
+        args.config_file = resolved if resolved.is_absolute() else (Path.cwd() / resolved)
     else:
-        if not config_file:
-            args.config_file = "configs/default_maskdino_orth_resnet_config.yaml"
+        args.config_file = repo_root / "configs" / "maskdino" / task / "no_ssl.yaml"
+    if not Path(args.config_file).is_file():
+        raise FileNotFoundError(
+            f"Config file not found: {args.config_file} (task={args.task})."
+        )
 
 
 def add_distributed_config(cfg) -> None:
@@ -257,8 +270,12 @@ class Trainer(DefaultTrainer):
 
     def resume_or_load(self, resume=True):
         # MODEL.WEIGHTS or a resume checkpoint restores a complete detector.
-        # Swin-MAE weights are only used for a genuinely new experiment.
+        # SSL / Swin-MAE weights are only used for a genuinely new experiment.
         if not (resume and self.checkpointer.has_checkpoint()) and not self.cfg.MODEL.WEIGHTS:
+            # Unified SSL path (SSL_METHOD + *_ssl_backbone builders); no-op
+            # unless the config opts in.
+            load_ssl_pretrained_backbone(self.model, self.cfg)
+            # Legacy path for the native D2SwinMAEBackbone.
             load_swin_mae_pretrained_backbone(self.model, self.cfg)
         return super().resume_or_load(resume=resume)
 
@@ -284,8 +301,8 @@ class Trainer(DefaultTrainer):
             ConciseMetricPrinter(self.max_iter, metric_names),
             JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
         ]
-        if getattr(self.cfg, "LOGGER", "tensorboard") == "wandb":
-            writers.append(WandbWriter(self.cfg))
+        if getattr(self.cfg, "LOGGER", "tensorboard") == "swanlab":
+            writers.append(SwanLabWriter(self.cfg))
         else:
             writers.append(TensorboardXWriter(self.cfg.OUTPUT_DIR))
         return writers
@@ -558,8 +575,8 @@ def setup(args):
     cfg.DATASETS.TEST = (f"{args.task}_val",)
     if args.output_dir is not None:
         cfg.OUTPUT_DIR = str(args.output_dir)
-    if args.wandb_name is not None:
-        cfg.WANDB.NAME = args.wandb_name
+    if args.swanlab_name is not None:
+        cfg.SWANLAB.NAME = args.swanlab_name
     cfg.TRAIN_LOG_PERIOD = args.log_period
     cfg.TRAIN_TQDM = not args.no_tqdm
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)

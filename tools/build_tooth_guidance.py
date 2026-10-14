@@ -11,7 +11,7 @@ and adds, alongside images/:
     tooth_outline/{D,F,L,R,U}.png black background, white per-tooth contour lines
 
 Tooth regions come from the same YOLO (per-view detector) + SAM (per-box
-segmentation) pipeline used in tmp_prompt.py.
+segmentation) pipeline that produced the tooth_mask / tooth_outline folders.
 """
 
 import argparse

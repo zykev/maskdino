@@ -1,0 +1,34 @@
+# DentMaG Swin encoder (Swin-Small, high-resolution in-domain SSL).
+#
+# Same Swin-Small trunk as `swinmae.yaml`; only the weights and the positional
+# scheme differ. DentMaG-Swin was trained without a learned absolute table and
+# encodes positions with a dynamic 2-D sin-cos embedding, so the two must not
+# be swapped or silently dropped.
+_BASE_: _base.yaml
+
+MODEL:
+  WEIGHTS: ""
+  BACKBONE:
+    NAME: "build_swin_ssl_backbone"
+    SSL_METHOD: "dentmag_swin"
+    USE_SSL_PRETRAINED: true
+    SSL_WEIGHTS: "/home/zychen/Documents/intraoral_code/maskdino/.checkpoints/pretrain/dentmap/swins_highres_checkpoint-50.pth"
+    SSL_CHECKPOINT_KEY: "encoder_teacher"
+    SSL_STRICT_LOAD: true
+    FREEZE_AT: 0
+    FEATURE_NAMES: ["res2", "res3", "res4", "res5"]
+  SWIN_SSL:
+    EMBED_DIM: 96
+    DEPTHS: [2, 2, 18, 2]
+    NUM_HEADS: [3, 6, 12, 24]
+    PATCH_SIZE: 4
+    WINDOW_SIZE: 7
+    POSITION_ENCODING: "dentmag_sincos"
+  MaskDINO:
+    # patch_size * 2^(num_layers-1) * window_size = 4 * 8 * 7.
+    SIZE_DIVISIBILITY: 224
+
+SWANLAB:
+  NAME: "maskdino_orth_dentmag_swin"
+
+OUTPUT_DIR: output/maskdino_orth_dentmag_swin

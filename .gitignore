@@ -46,9 +46,13 @@ _darcs
 
 # project dirs
 /detectron2/model_zoo/configs
-/datasets/*
-!/datasets/*.*
+# upstream ADE20K / COCO-panoptic preparation scripts (not used by intraoral training)
+/datasets_coco/*
+!/datasets_coco/*.*
 /projects/*/datasets
+
+# macOS
+.DS_Store
 /models
 /snippet
 

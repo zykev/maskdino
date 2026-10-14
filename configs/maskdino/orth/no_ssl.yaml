@@ -1,0 +1,19 @@
+# Control: no SSL pretraining anywhere.
+#
+# ResNet-50 FPN with the plain ImageNet (torchvision) initialisation inherited
+# from the COCO base config -- the baseline this repo has always used for orth.
+# Every SSL variant in this folder shares the same backbone/task head and
+# differs only in how the image encoder is initialised.
+_BASE_: _base.yaml
+
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
+  BACKBONE:
+    NAME: "build_resnet_backbone"
+    SSL_METHOD: "none"
+    USE_SSL_PRETRAINED: false
+
+SWANLAB:
+  NAME: "maskdino_orth_resnet"
+
+OUTPUT_DIR: output/maskdino_orth_resnet

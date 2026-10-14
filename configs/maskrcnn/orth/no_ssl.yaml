@@ -1,0 +1,19 @@
+# Control: no SSL pretraining anywhere.
+#
+# Plain Detectron2 ResNet-50 FPN initialised from the full COCO Mask R-CNN
+# checkpoint (ImageNet + COCO supervised), i.e. the baseline this repo has
+# always used for orth. Every SSL variant in this folder shares the same
+# backbone/task head and differs only in how the image encoder is initialised.
+_BASE_: _base.yaml
+
+MODEL:
+  WEIGHTS: detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl
+  BACKBONE:
+    NAME: "build_resnet_fpn_backbone"
+    SSL_METHOD: "none"
+    USE_SSL_PRETRAINED: false
+
+SWANLAB:
+  NAME: "maskrcnn_orth"
+
+OUTPUT_DIR: output/maskrcnn_orth

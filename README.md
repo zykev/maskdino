@@ -69,12 +69,120 @@ See [installation instructions](INSTALL.md).
 
 
 
+## Intraoral runs: SSL backbone variants
+
+This fork trains Mask R-CNN and MaskDINO on the intraoral `caries` / `orth`
+datasets with a swapped-in self-supervised image encoder. Every run is one YAML
+under [`configs/`](configs/README.md), organised as
+`configs/<detector>/<task>/<variant>.yaml`:
+
+```
+configs/maskrcnn/{caries,orth}/{_base, no_ssl, simclr, swinmae, dentmag_swin, dinov2}.yaml
+configs/maskdino/{caries,orth}/{_base, no_ssl, simclr, swinmae, dentmag_swin, dinov2}.yaml
+```
+
+`no_ssl` (ImageNet / COCO control), `simclr` (SimCLRv2 ResNet-50),
+`swinmae` (Swin-Small + Swin-MAE), `dentmag_swin` (Swin-Small + DentMaG
+high-res) and `dinov2` (DINOv2 ViT-S/14). All five share the same task head,
+data pipeline, augmentation and solver, so **only the encoder initialisation
+differs**. Weights live in `.checkpoints/pretrain/`.
+
+```bash
+# Mask R-CNN, orth, Swin-MAE encoder
+python maskrcnn_unify.py --task orth \
+  --config_file configs/maskrcnn/orth/swinmae.yaml \
+  --input_dir .datasets/intraoral_anno/orth_0616 --output_dir output/maskrcnn_orth_swinmae
+
+# MaskDINO, caries, DINOv2 encoder
+python maskdino_unify.py --task caries \
+  --config_file configs/maskdino/caries/dinov2.yaml \
+  --input_dir .datasets/intraoral_anno/single_ch_0225
+```
+
+Both entry points default to the `no_ssl` control and resolve config paths
+against the repository root, so they work from any working directory. Ready-made
+launchers live in `scripts/`; see [`configs/README.md`](configs/README.md) for
+the full field reference, the padding constraints, and the verification
+commands:
+
+```bash
+python scripts/validate_ssl_configs.py     # 20/20 config invariants
+python scripts/smoke_detectors.py          # 20/20 build + load + forward on GPU
+```
+
+Design notes: [`Docs/ssl_backbone_adapter_implementation_plan.md`](Docs/ssl_backbone_adapter_implementation_plan.md).
+
+### Repository layout
+
+Only the runnable entry points sit at the repository root:
+
+| Path | Role |
+|---|---|
+| `maskrcnn_unify.py`, `maskdino_unify.py` | train + evaluate, driven by a `configs/<detector>/<task>/<variant>.yaml` |
+| `maskrcnn_pred.py`, `maskdino_pred.py` | prediction / qualitative panels |
+| `fasterrcnn_orth.py`, `fasterrcnn_orth_pred.py` | Faster R-CNN baseline (uses `configs/default_fasterrcnn_orth_config.yaml`) |
+| `train_net.py` | upstream MaskDINO entry point, for the stock `configs/coco/*` recipes |
+
+Everything else is importable:
+
+| Path | Contents |
+|---|---|
+| `maskdino/` | the MaskDINO package; `maskdino/modeling/backbone/` holds the SSL adapters (`swin_ssl_backbone`, `resnet_ssl_backbone`, `vit_ssl_backbone`), the shared checkpoint helpers (`ssl_common`) and the Swin building blocks they share (`swin_unet`) |
+| `utils/` | project-wide helpers: `task_paths` (dataset path resolution) and `unify_common` (trainer hooks, dataset registration, evaluation panels) |
+| `datasets/` | this project's annotation pipeline: `caries_to_coco` / `caries_coco_split` (caries teeth), `orth_to_coco` / `orth_coco_split` (orthodontics), plus `orth_augmentations`, `class_balance`, and the one-off `migrate_to_images_anno_layout` |
+| `datasets_coco/` | *(upstream, unused here)* ADE20K / COCO-panoptic annotation preparation, kept only for reference |
+| `tools/` | standalone CLI utilities (`analyze_orth_geometry`, `analyze_orth_test_annotations`, `sample_stat`, `visualize_orth_augmentations`, `build_tooth_guidance`, `sam`, weight converters) |
+| `scripts/` | `train_*.sh` / `eval_*.sh` launchers and the validation / smoke-test scripts |
+
+The `datasets/` name belongs to this project's own annotation pipeline; the
+inherited upstream scripts were parked in `datasets_coco/` and are not imported
+by any training code.
+
+Both conversion scripts assume the **`images/` + `anno/` layout**:
+
+```
+<root>/<sample_id>/images/<any/depth>/<name>.<suffix>   # images
+<root>/<sample_id>/anno/<any/depth>/<name>.json         # LabelMe annotations
+```
+
+`file_name` in the emitted COCO JSON is relative to `--data-dir`, so a sample
+is always `<sample_id>/images/<any/depth>/<name>.<suffix>`. Raw datasets that
+still use the old co-located layout are converted once with:
+
+```bash
+python datasets/migrate_to_images_anno_layout.py --root <root> --dry-run  # preview
+python datasets/migrate_to_images_anno_layout.py --root <root>            # then apply
+```
+
+`caries_to_coco.py` and `orth_to_coco.py` share the same discovery rules: an
+image and its annotation are paired by their path relative to `--data-dir` with
+the `images` / `anno` component removed and the file suffix dropped, so
+`2207/images/D/41.png` and `2207/anno/D/41.json` (or `2207/anno/41.json`) both
+pair up. Consequences:
+
+* the annotation folder depth is free — any `<view>` nesting (or none) works,
+* any image suffix in `IMAGE_SUFFIXES` is accepted, not only `.png` / `.jpg`,
+* images without an annotation are kept as negative samples; pass
+  `--drop-empty-images` to drop them instead.
+
+`caries_to_coco.py` additionally accepts `--allow-missing-images` to keep the
+records of annotations whose image file is missing (off by default, so every
+emitted `file_name` exists on disk), and — unlike `orth_to_coco.py` — never
+fails on an unreadable image: it falls back to the LabelMe `imageWidth` /
+`imageHeight` fields and finally to `0 x 0`.
+
+Swin-MAE *pretraining* is not part of this repository — the pretrained
+checkpoints under `.checkpoints/pretrain/` come from the sibling `Swin-MAE`
+project.
+
+
+
 ## Getting Started
 See [Inference Demo with Pre-trained Model](demo/README.md)
 
 See [Results](#results).
 
-See [Preparing Datasets for MaskDINO](datasets/README.md).
+See [Preparing Datasets for MaskDINO](datasets_coco/README.md).
 
 See [Getting Started](#getting-started-1).
 

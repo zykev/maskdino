@@ -9,7 +9,7 @@ from detectron2.data import detection_utils as utils
 from detectron2.data import transforms as T
 from detectron2.data.transforms import TransformGen
 from pycocotools import mask as coco_mask
-from datasets_coco.orth_augmentations import build_orth_augmentations
+from datasets.orth_augmentations import build_orth_augmentations
 __all__ = ["DetrDatasetMapper"]
 def convert_coco_poly_to_mask(segmentations, height, width):
     masks = []
