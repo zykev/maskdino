@@ -52,6 +52,7 @@ from maskdino import (
     add_maskdino_config,
     DetrDatasetMapper,
 )
+from maskdino.modeling.backbone.ssl_common import load_ssl_pretrained_backbone
 from maskdino.modeling.backbone.swin_mae import load_swin_mae_pretrained_backbone
 import random
 from detectron2.engine import (
@@ -116,9 +117,10 @@ class Trainer(DefaultTrainer):
         # TODO: release GPU cluster submit scripts based on submitit for multi-node training
 
     def resume_or_load(self, resume=True):
-        # Keep complete detector checkpoints and MAE image-encoder checkpoints
-        # separate. A resume checkpoint always takes precedence.
+        # Keep complete detector checkpoints and SSL / MAE image-encoder
+        # checkpoints separate. A resume checkpoint always takes precedence.
         if not (resume and self.checkpointer.has_checkpoint()) and not self.cfg.MODEL.WEIGHTS:
+            load_ssl_pretrained_backbone(self.model, self.cfg)
             load_swin_mae_pretrained_backbone(self.model, self.cfg)
         return super().resume_or_load(resume=resume)
 

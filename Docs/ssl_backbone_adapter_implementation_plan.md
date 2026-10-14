@@ -139,29 +139,36 @@ MODEL:
 MODEL:
   SWIN_SSL:
     EMBED_DIM: 96
-    DEPTHS: [2, 2, 6, 2]
+    DEPTHS: [2, 2, 18, 2]
     NUM_HEADS: [3, 6, 12, 24]
     PATCH_SIZE: 4
     WINDOW_SIZE: 7
-    POSITION_ENCODING: "dentmag_sincos"  # none | dentmag_sincos | native_fixed
+    MLP_RATIO: 4.0
+    PATCH_NORM: true
+    POSITION_ENCODING: "dentmag_sincos"  # "" | none | dentmag_sincos | native_fixed
+    IMG_SIZE: 224         # native grid of the learned absolute table (native_fixed only)
 
   RESNET_SSL:
-    DEPTH: 50
+    DEPTH: 50             # 0 -> falls back to MODEL.RESNETS.DEPTH
     WIDTH_MULTIPLIER: 1
     STEM_TYPE: "simclrv2"
     SK_RATIO: 0.0625
 
   VIT_SSL:
-    ARCH: "vit_base"
+    ARCH: "dinov2_vits14"  # vit_tiny|vit_small|vit_base|vit_large|vit_small_p16|vit_base_p16|dinov2_vits14|dinov2_vitb14
     PATCH_SIZE: 14
-    EMBED_DIM: 768
+    EMBED_DIM: 384
     DEPTH: 12
-    NUM_HEADS: 12
+    NUM_HEADS: 6
     NUM_REGISTER_TOKENS: 0
-    OUT_BLOCKS: [3, 6, 9, 12]
+    OUT_BLOCKS: [3, 6, 9, 12]   # 1-indexed
     PYRAMID_CHANNELS: 256
     PYRAMID_NORM: "LN"
+    PYRAMID_SMOOTHING: false
+    IMG_SIZE: 448                # training resolution of the checkpoint pos_embed
 ```
+
+`POSITION_ENCODING` 为空字符串时按 `SSL_METHOD` 推导：`swinmae` → `native_fixed`（checkpoint 自带的绝对位置表，前向时按真实 grid 做 bicubic 重采样），`dentmag_swin` → `dentmag_sincos`（checkpoint 不带 `pos_embed`）。`ARCH` 是一个 preset 名，各 preset 自带 `patch_size / embed_dim / depth / num_heads`，显式字段覆盖 preset。
 
 `SSL_METHOD=imagenet` 表示只初始化与该 encoder 同构的 ImageNet 权重，检测/分割 task head 仍随机初始化。完整 COCO 下游 checkpoint 不通过 `SSL_METHOD` 加载，而是使用 `MODEL.WEIGHTS` 恢复，并在实验记录中标记为 full-model baseline。可选的随机初始化只用于 smoke test 或训练诊断，不能替代 ImageNet/COCO 主基线。
 
@@ -436,10 +443,50 @@ res5 spatial = 28 × 28
 
 - 三个 Detectron2 SSL backbone：`SwinSSLBackbone`、`ResNetSSLBackbone`、`ViTSSLBackbone`；
 - 三个标准化 feature adapter：`SwinAdapter`、`ResNetAdapter`、`ViTAdapter`；
-- 统一 checkpoint loader 与严格加载报告；
-- 每个 family 的 Mask R-CNN / MaskDINO 配置；
+- 统一 checkpoint loader（`maskdino/modeling/backbone/ssl_common.py`）与严格加载报告；
+- 每个 family 的 Mask R-CNN / MaskDINO 配置，见 `configs/<detector>/<task>/`（见 §14）；
 - ImageNet baseline / COCO full-model baseline / baseline SSL / DentMag SSL 的可复现实验矩阵；
-- feature contract、加载日志和 forward smoke tests；
+- feature contract、加载日志和 forward smoke tests
+  （`scripts/validate_ssl_configs.py`、`scripts/smoke_ssl_backbones.py`、`scripts/smoke_detectors.py`、
+  `scripts/inspect_pretrain_tree.py`）；
 - 病例级 SSL 数据泄漏审计记录。
 
 该设计保证 adapter 只解决“把预训练表征变成 Detectron2 多尺度输入”的问题，检测与分割的主要建模能力持续由 Mask R-CNN 和 MaskDINO 承担。
+
+## 14. 配置树与运行方式
+
+配置按 **detector → task → encoder variant** 组织，一次运行的身份可以直接从路径读出：
+
+```
+configs/
+  maskrcnn/{caries,orth}/{_base, no_ssl, simclr, swinmae, dentmag_swin, dinov2}.yaml
+  maskdino/{caries,orth}/{_base, no_ssl, simclr, swinmae, dentmag_swin, dinov2}.yaml
+  _legacy/            # 已退休的扁平 default_*_config.yaml，仅为旧实验记录保留
+```
+
+- `_base.yaml` 只描述 task + detector 超参（ROI heads、RPN、anchor、输入尺度、
+  dataloader、solver、`ORTH_AUGMENTATION`、`ORTH_CLASS_BALANCE` 等），**不包含
+  任何 backbone 选择**，因此不能单独运行；每个 variant 以 `_BASE_: _base.yaml` 起始。
+- `<variant>.yaml` 只写 backbone block 与 `SWANLAB.NAME` / `OUTPUT_DIR`。其余全部继承，
+  这正是五个 variant 构成受控对比的原因：数据、增强、solver、task head 完全一致，
+  **只有 image encoder 的初始化不同**。
+- `no_ssl` 是对照组，并且是与 `simclr` 同构的 ResNet-50 C2–C5，因此
+  `no_ssl ↔ simclr` 隔离出 SimCLRv2 预训练的作用；`swinmae ↔ dentmag_swin`
+  在完全相同的 Swin-Small encoder 上隔离出领域（DentMaG）预训练的作用。
+- 「随机初始化」不是单独目录，而是把对应 variant 的权重关掉：
+  `MODEL.BACKBONE.USE_SSL_PRETRAINED: false` + `SSL_WEIGHTS: ""`。
+- 两个 detector 消费同一个 adapter，但接入点不同，因此 `MODEL.BACKBONE.NAME`
+  分两套：Mask R-CNN 用 `*_ssl_fpn_backbone`（外包 Detectron2 FPN），
+  MaskDINO 用 `*_ssl_backbone`（直接把 `res2–res5` 交给 deformable pixel decoder）。
+
+两个入口（`maskrcnn_unify.py`、`maskdino_unify.py`）现在都把默认配置解析到仓库根目录，
+因此可以在任意工作目录下启动；默认值是 `no_ssl` 对照，任何 SSL 运行都必须显式指定：
+
+```bash
+python maskrcnn_unify.py --task orth \
+  --config_file configs/maskrcnn/orth/swinmae.yaml \
+  --input_dir .datasets/intraoral_anno/orth_0616 \
+  --output_dir output/maskrcnn_orth_swinmae --swanlab_name maskrcnn_orth_swinmae
+```
+
+完整说明、字段表、padding 约束与校验命令见 [`configs/README.md`](../configs/README.md)。

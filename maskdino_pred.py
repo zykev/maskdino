@@ -19,7 +19,7 @@ from detectron2.structures import Boxes, pairwise_iou
 from detectron2.utils.logger import setup_logger
 
 from maskdino import add_maskdino_config
-from task_paths import add_input_dir_arg
+from utils.task_paths import add_input_dir_arg
 from maskdino_unify import (
     apply_default_paths,
     load_categories,

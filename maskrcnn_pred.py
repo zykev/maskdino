@@ -18,7 +18,7 @@ from detectron2.evaluation import COCOEvaluator, DatasetEvaluator, DatasetEvalua
 from detectron2.structures import Boxes, pairwise_iou
 from detectron2.utils.logger import setup_logger
 
-from task_paths import add_input_dir_arg
+from utils.task_paths import add_input_dir_arg
 from maskrcnn_unify import (
     add_panel_title,
     build_cfg,
