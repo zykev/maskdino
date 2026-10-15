@@ -1,8 +1,74 @@
+# ===========================================================================
+# Shared environment for the intraoral project suite:
+#   maskdino  (Mask R-CNN / MaskDINO detection + segmentation)
+#   intraoral (data acquisition / annotation utilities)
+#   dentmag   (representation learning / classifiers)
+#
+# Reference env: conda `intraoral` -> Python 3.12, PyTorch 2.7 + CUDA 11.8.
+# Versions below are the versions verified in that env on 2026-10-15.
+#
+# For a fully automated install of the shared env on a new machine, run
+# `bash setup.sh` (next to this file) instead of installing by hand.
+#
+# Packages that CANNOT be installed from this file (must be set up separately):
+#   git clone https://github.com/facebookresearch/detectron2.git
+#   cd detectron2
+#   sed -i 's/"iopath>=0.1.7,<0.1.10"/"iopath>=0.1.7"/' setup.py   # env has iopath 0.1.10
+#   pip install -e .   # used by all three projects; upstream master, needs CUDA toolkit
+#   sh maskdino/modeling/pixel_decoder/ops/make.sh   # -> MultiScaleDeformableAttention
+#   # sam3 (optional; not imported by maskdino/intraoral/dentmag):
+#   pip install --no-build-isolation git+https://github.com/facebookresearch/sam3.git
+# ===========================================================================
+
+# --- core -------------------------------------------------------------------
+numpy==1.26.4
+scipy==1.17.1
+opencv-python==4.10.0.84
+Pillow==12.2.0
+pillow_heif==1.3.0
+PyYAML==6.0.3
+matplotlib==3.10.9
+pandas==3.0.3
+tqdm==4.67.3
+einops==0.8.2
+tabulate==0.10.0
+pycocotools==2.0.11
+fvcore==0.1.5.post20221221
+
+# --- deep learning ----------------------------------------------------------
+# Install the CUDA 11.8 wheels explicitly (the default PyPI wheel targets cu12x):
+#   pip install torch==2.7.0 torchvision==0.22.0 \
+#       --index-url https://download.pytorch.org/whl/cu118
+torch==2.7.0
+torchvision==0.22.0
+
+# --- models / backbones -----------------------------------------------------
+timm==1.0.27
+transformers==5.8.1
+accelerate==1.14.0
+scikit-learn==1.8.0
+umap-learn==0.5.12
+ultralytics==8.4.50
+segment-anything-hq==0.3
+
+# --- experiment logging -----------------------------------------------------
+swanlab==0.10.1
+
+# --- Google Drive data I/O (intraoral) --------------------------------------
+google-api-python-client==2.197.0
+google-auth-oauthlib==1.4.0
+
+# --- build-time helpers (MSDeformAttn op, pycocotools from sdist) -----------
+ninja==1.13.0
 cython
-scipy
-shapely
-timm
-h5py
-submitit
-scikit-image
-opencv-python
+
+# ---------------------------------------------------------------------------
+# Not included on purpose:
+#   h5py / shapely / scikit-image / submitit -> not imported by any of the
+#       three projects (h5py unused, shapely only an optional warning filter in
+#       train_net.py, scikit-image unused, submitit only in vendored baselines)
+#   wandb / xformers / tensorboard / omegaconf / hydra-core / iopath / yacs
+#       -> superseded (swanlab) or pulled in transitively by detectron2 / timm
+#   modelscope -> only used by intraoral/download_sam3.py
+#   panopticapi -> only needed by the upstream COCO-panoptic maskdino configs
+# ===========================================================================
