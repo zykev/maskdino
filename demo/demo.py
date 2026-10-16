@@ -4,10 +4,13 @@ import argparse
 import glob
 import multiprocessing as mp
 import os
+from pathlib import Path
 
 # fmt: off
 import sys
-sys.path.insert(1, os.path.join(sys.path[0], '..'))
+# 让脚本无论从哪个目录启动，都能 import 仓库里的 maskdino / utils 包。
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(1, str(REPO_ROOT))
 # fmt: on
 
 import tempfile
@@ -26,9 +29,54 @@ from detectron2.utils.logger import setup_logger
 from maskdino import add_maskdino_config
 from predictor import VisualizationDemo
 
+from utils.orth_class_balance import compute_effective_class_weights
+from utils.task_paths import DEFAULT_INPUT_DIRS, add_input_dir_arg, resolve_task_paths
+from utils.unify_common import load_categories, register_datasets
+
 
 # constants
-WINDOW_NAME = "mask2former demo"
+WINDOW_NAME = "maskdino demo"
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "maskdino" / "orth" / "no_ssl.yaml"
+
+
+def apply_task_config(args, cfg):
+    """把训练脚本注入的、推理时同样必需的配置项补齐。
+
+    这些值在 yaml 里没有写死，只有 `maskdino_unify.setup` 会根据数据集算出来：
+
+    * ``MODEL.SEM_SEG_HEAD.NUM_CLASSES``：yaml 缺省是 80，不改会导致加载权重时
+      类别数对不上；
+    * ``ORTH_BBOX_ONLY``：orth 只有框标注，用它关掉 mask 分支；
+    * ``ORTH_CLASS_BALANCE.CLASS_WEIGHTS``：``SetCriterion`` 会校验长度必须等于
+      类别数，训练脚本按有效样本数权重算出，这里复用同一套算法。
+
+    另外注册本项目的数据集，可视化时才能画出类别名。返回 val 数据集名。
+    """
+    task_args = resolve_task_paths(
+        argparse.Namespace(
+            task=args.task,
+            input_dir=args.input_dir or REPO_ROOT / DEFAULT_INPUT_DIRS[args.task],
+            image_subdir=args.image_subdir,
+            keep_negative_ratio=0.2,
+            seed=42,
+        )
+    )
+    class_names = load_categories(task_args.train_json, args.task)
+    register_datasets(task_args, class_names, include_masks=args.task == "caries")
+
+    num_classes = len(class_names)
+    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = num_classes
+    cfg.ORTH_BBOX_ONLY = args.task == "orth"
+    balance = getattr(cfg, "ORTH_CLASS_BALANCE", None)
+    if args.task == "orth" and balance is not None and balance.ENABLED:
+        cfg.ORTH_CLASS_BALANCE.CLASS_WEIGHTS = compute_effective_class_weights(
+            task_args.train_json,
+            num_classes,
+            beta=float(balance.BETA),
+            clip_min=float(balance.CLIP_MIN),
+            clip_max=float(balance.CLIP_MAX),
+        )
+    return f"{args.task}_val"
 
 
 def setup_cfg(args):
@@ -36,20 +84,36 @@ def setup_cfg(args):
     cfg = get_cfg()
     add_deeplab_config(cfg)
     add_maskdino_config(cfg)
+    # 与 maskdino_unify._build_base_cfg 保持一致：本项目在 config 里自定义了
+    # DATALOADER.KEEP_NEGATIVE_RATIO / AUGMENTATION / ORTH_CLASS_BALANCE /
+    # SWANLAB 等键，必须先放开未知键才能 merge。
+    cfg.set_new_allowed(True)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+    # 指向本项目注册的 val 数据集；标注文件缺失时降级为不带类别名的可视化。
+    try:
+        cfg.DATASETS.TEST = (apply_task_config(args, cfg),)
+    except (FileNotFoundError, ValueError) as exc:
+        warnings.warn(f"跳过数据集注册，可视化将不显示类别名：{exc}")
     cfg.freeze()
     return cfg
 
 
 def get_parser():
-    parser = argparse.ArgumentParser(description="maskdino demo for builtin configs")
+    parser = argparse.ArgumentParser(description="intraoral maskdino / maskrcnn demo")
     parser.add_argument(
         "--config-file",
-        default="configs/coco/instance-segmentation/maskdino_R50_bs16_50ep_3s.yaml",
+        default=str(DEFAULT_CONFIG),
         metavar="FILE",
-        help="path to config file",
+        help="path to config file (defaults to the intraoral orth baseline)",
     )
+    parser.add_argument(
+        "--task",
+        default="orth",
+        choices=("orth", "caries"),
+        help="intraoral task of the checkpoint; drives the dataset metadata",
+    )
+    add_input_dir_arg(parser)
     parser.add_argument("--webcam", action="store_true", help="Take inputs from webcam.")
     parser.add_argument("--video-input", help="Path to video file.")
     parser.add_argument(

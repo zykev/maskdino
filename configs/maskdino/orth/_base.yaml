@@ -24,7 +24,9 @@ MODEL:
     DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES: ["res3", "res4", "res5"]
     COMMON_STRIDE: 4
     TRANSFORMER_ENC_LAYERS: 3
-    FEATURE_ORDER: "low2high"
+    # 与 maskdino/config.py 的默认值保持一致；该值参与 encoder 权重绑定，
+    # 改变后已训练的 checkpoint 无法直接复用，必须重新训练。
+    FEATURE_ORDER: "high2low"
   MaskDINO:
     TRANSFORMER_DECODER_NAME: "MaskDINODecoder"
     DEEP_SUPERVISION: True

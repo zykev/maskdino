@@ -4,8 +4,8 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 from detectron2.config import CfgNode as CN
-from datasets.class_balance import add_class_balance_config
 from datasets.augmentations import add_augmentation_config
+from utils.orth_class_balance import add_class_balance_config
 
 
 def add_swin_mae_backbone_config(cfg):

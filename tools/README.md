@@ -1,52 +1,25 @@
-We use ResNet and Swin as the backbone in our model.
+# tools/
 
-* `convert-torchvision-to-d2.py`
+Utilities for the intraoral `caries` / `orth` workflows.
 
-Tool to convert torchvision pre-trained weights for D2.
+## Project tools (orth / caries)
 
-```
-wget https://download.pytorch.org/models/resnet101-63fe2227.pth
-python tools/convert-torchvision-to-d2.py resnet101-63fe2227.pth R-101.pkl
-```
+| Script | What it does | Typical usage |
+| --- | --- | --- |
+| `build_tooth_guidance.py` | Runs SAM-HQ over the orth images to produce tooth-mask guidance (`tooth_mask` image subdir) used as an extra input channel / prompt. | `python tools/build_tooth_guidance.py --help` |
+| `sam.py` | Shared SAM-HQ wrapper (predictor / mask helpers) imported by `build_tooth_guidance.py`. Not a CLI entry point. | — |
+| `analyze_orth_geometry.py` | Box geometry statistics over the orth LabelMe annotations (box size, area, aspect-ratio histograms) at several resize scales, written to `reports/`. | `python tools/analyze_orth_geometry.py` |
+| `analyze_orth_test_annotations.py` | Per-class montage + statistics of the orth rectangle annotations, written to `output/orth_annotation_analysis/`. | `python tools/analyze_orth_test_annotations.py --draw-other-labels` |
+| `visualize_orth_augmentations.py` | Visualizes the orth input/augmentation pipeline as montage tiles. | `python tools/visualize_orth_augmentations.py` |
 
-* `convert-pretrained-swin-model-to-d2.py`
+Useful flags for the analysis tools:
 
-Tool to convert Swin Transformer pre-trained weights for D2.
+* `analyze_orth_geometry.py` — `--data-dir`, `--out-dir`, `--scales`, `--max-size`, `--bins`
+* `analyze_orth_test_annotations.py` — `--data-dir`, `--out-dir`, `--tile-size`, `--cols`, `--max-tiles-per-page`, `--draw-other-labels`
+* `visualize_orth_augmentations.py` — `--data-dir`, `--out-dir`, `--sample-ids`, `--seed`, `--tile-width`, `--tile-height`
 
-```
-pip install timm
-
-wget https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_tiny_patch4_window7_224.pth
-python tools/convert-pretrained-swin-model-to-d2.py swin_tiny_patch4_window7_224.pth swin_tiny_patch4_window7_224.pkl
-
-wget https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_small_patch4_window7_224.pth
-python tools/convert-pretrained-swin-model-to-d2.py swin_small_patch4_window7_224.pth swin_small_patch4_window7_224.pkl
-
-wget https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_base_patch4_window12_384_22k.pth
-python tools/convert-pretrained-swin-model-to-d2.py swin_base_patch4_window12_384_22k.pth swin_base_patch4_window12_384_22k.pkl
-
-wget https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_large_patch4_window12_384_22k.pth
-python tools/convert-pretrained-swin-model-to-d2.py swin_large_patch4_window12_384_22k.pth swin_large_patch4_window12_384_22k.pkl
-```
+Each defaults to the current orth layout
+(`.datasets/intraoral_anno/orth_0616/orth_0616`) and a folder under `reports/`
+or `output/`, so they can be run with no arguments.
 
 
-* `analyze_model.py`
-
-Tool to analyze model parameters and flops.
-
-Usage for semantic segmentation (ADE20K only, use with caution!):
-
-```
-python tools/analyze_model.py --num-inputs 1 --tasks flop --use-fixed-input-size --config-file CONFIG_FILE
-```
-
-Note that, for semantic segmentation (ADE20K only), we use a dummy image with fixed size that equals to `cfg.INPUT.CROP.SIZE[0] x cfg.INPUT.CROP.SIZE[0]`.
-Please do not use `--use-fixed-input-size` for calculating FLOPs on other datasets like Cityscapes!
-
-Usage for panoptic and instance segmentation:
-
-```
-python tools/analyze_model.py --num-inputs 100 --tasks flop --config-file CONFIG_FILE
-```
-
-Note that, for panoptic and instance segmentation, we compute the average flops over 100 real validation images.

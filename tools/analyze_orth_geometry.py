@@ -37,7 +37,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 # fmt: on
 
-from datasets.orth_to_coco import CATEGORY_INFO_BY_NAME
+from datasets.prepare_coco import ORTH_CATEGORY_INFO_BY_NAME
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -181,10 +181,10 @@ def normalize_box(points: Iterable[Iterable[float]]) -> tuple[float, float, floa
 
 
 def known_supercategory(label: str) -> str:
-    info = CATEGORY_INFO_BY_NAME.get(label)
+    info = ORTH_CATEGORY_INFO_BY_NAME.get(label)
     if info:
         return str(info["supercategory"])
-    if label in {item["supercategory"] for item in CATEGORY_INFO_BY_NAME.values()}:
+    if label in {item["supercategory"] for item in ORTH_CATEGORY_INFO_BY_NAME.values()}:
         return label
     return "unknown"
 

@@ -1,6 +1,0 @@
-_BASE_: default_maskdino_orth_base_config.yaml
-
-SWANLAB:
-  NAME: "maskdino_orth_resnet"
-
-OUTPUT_DIR: output/maskdino_orth_resnet

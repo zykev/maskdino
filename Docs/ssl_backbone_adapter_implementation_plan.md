@@ -446,9 +446,10 @@ res5 spatial = 28 × 28
 - 统一 checkpoint loader（`maskdino/modeling/backbone/ssl_common.py`）与严格加载报告；
 - 每个 family 的 Mask R-CNN / MaskDINO 配置，见 `configs/<detector>/<task>/`（见 §14）；
 - ImageNet baseline / COCO full-model baseline / baseline SSL / DentMag SSL 的可复现实验矩阵；
-- feature contract、加载日志和 forward smoke tests
-  （`scripts/validate_ssl_configs.py`、`scripts/smoke_ssl_backbones.py`、`scripts/smoke_detectors.py`、
-  `scripts/inspect_pretrain_tree.py`）；
+- feature contract、加载日志和 forward smoke tests（实现期位于
+  `scripts/validate_ssl_configs.py`、`scripts/smoke_ssl_backbones.py`、
+  `scripts/smoke_detectors.py`、`scripts/inspect_pretrain_tree.py`；这批一次性脚本
+  已在收敛后删除，运行入口统一为 `scripts/train/` 与 `scripts/eval/` 下的启动脚本）；
 - 病例级 SSL 数据泄漏审计记录。
 
 该设计保证 adapter 只解决“把预训练表征变成 Detectron2 多尺度输入”的问题，检测与分割的主要建模能力持续由 Mask R-CNN 和 MaskDINO 承担。

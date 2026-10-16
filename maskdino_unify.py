@@ -48,8 +48,8 @@ from detectron2.utils.env import seed_all_rng
 from detectron2.utils.events import JSONWriter, TensorboardXWriter
 from detectron2.utils.logger import setup_logger
 
-from datasets.class_balance import compute_effective_class_weights
 from datasets.augmentations import augmentation_enabled, build_augmentations
+from utils.orth_class_balance import compute_effective_class_weights
 from utils.task_paths import add_input_dir_arg, resolve_task_paths
 from maskdino import (
     COCOInstanceNewBaselineDatasetMapper,

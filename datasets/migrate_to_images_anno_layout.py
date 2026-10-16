@@ -7,7 +7,7 @@ flat ``<sample_id>/D.jpg`` or caries' ``<sample_id>/<view>/<tooth_id>.png``):
     <root>/<sample_id>/<...>/<name>.jpg
     <root>/<sample_id>/<...>/<name>.json
 
-New layout, expected by orth_to_coco.py / caries_to_coco.py:
+New layout, expected by datasets/prepare_coco.py:
 
     <root>/<sample_id>/images/<...>/<name>.jpg
     <root>/<sample_id>/anno/<...>/<name>.json

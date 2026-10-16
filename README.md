@@ -101,14 +101,17 @@ python maskdino_unify.py --task caries \
 
 Both entry points default to the `no_ssl` control and resolve config paths
 against the repository root, so they work from any working directory. Ready-made
-launchers live in `scripts/`; see [`configs/README.md`](configs/README.md) for
-the full field reference, the padding constraints, and the verification
-commands:
+launchers live in `scripts/train/` and `scripts/eval/` — each one runs all five
+variants for a single `(detector, task)` pair:
 
 ```bash
-python scripts/validate_ssl_configs.py     # 20/20 config invariants
-python scripts/smoke_detectors.py          # 20/20 build + load + forward on GPU
+CUDA_VISIBLE_DEVICES=0 bash scripts/train/train_maskdino_orth.sh
+VARIANTS="swinmae dinov2" bash scripts/eval/eval_maskrcnn_caries.sh
 ```
+
+See [`scripts/README.md`](scripts/README.md) for the full matrix and the
+available knobs, and [`configs/README.md`](configs/README.md) for the config
+field reference and the padding constraints.
 
 Design notes: [`Docs/ssl_backbone_adapter_implementation_plan.md`](Docs/ssl_backbone_adapter_implementation_plan.md).
 
@@ -121,31 +124,42 @@ Only the runnable entry points sit at the repository root:
 | `maskrcnn_unify.py`, `maskdino_unify.py` | train + evaluate, driven by a `configs/<detector>/<task>/<variant>.yaml` |
 | `maskrcnn_pred.py`, `maskdino_pred.py` | prediction / qualitative panels |
 | `fasterrcnn_orth.py`, `fasterrcnn_orth_pred.py` | Faster R-CNN baseline (uses `configs/default_fasterrcnn_orth_config.yaml`) |
-| `train_net.py` | upstream MaskDINO entry point, for the stock `configs/coco/*` recipes |
 
 Everything else is importable:
 
 | Path | Contents |
 |---|---|
 | `maskdino/` | the MaskDINO package; `maskdino/modeling/backbone/` holds the SSL adapters (`swin_ssl_backbone`, `resnet_ssl_backbone`, `vit_ssl_backbone`), the shared checkpoint helpers (`ssl_common`) and the Swin building blocks they share (`swin_unet`) |
-| `utils/` | project-wide helpers: `task_paths` (dataset path resolution) and `unify_common` (trainer hooks, dataset registration, evaluation panels) |
-| `datasets/` | this project's annotation pipeline: `caries_to_coco` / `caries_coco_split` (caries teeth), `orth_to_coco` / `orth_coco_split` (orthodontics), plus `augmentations` (per-task caries/orth policies), `class_balance`, and the one-off `migrate_to_images_anno_layout` |
-| `datasets_coco/` | *(upstream, unused here)* ADE20K / COCO-panoptic annotation preparation, kept only for reference |
-| `tools/` | standalone CLI utilities (`analyze_orth_geometry`, `analyze_orth_test_annotations`, `sample_stat`, `visualize_orth_augmentations`, `build_tooth_guidance`, `sam`, weight converters) |
-| `scripts/` | `train_*.sh` / `eval_*.sh` launchers and the validation / smoke-test scripts |
+| `utils/` | project-wide helpers: `task_paths` (dataset path resolution), `unify_common` (trainer hooks, dataset registration, evaluation panels) and `orth_class_balance` (orth class-weight computation) |
+| `datasets/` | this project's annotation pipeline: `prepare_coco` (raw LabelMe → COCO JSON → train/test split, for both tasks), plus `augmentations` (per-task caries/orth policies) and the one-off `migrate_to_images_anno_layout` |
+| `tools/` | standalone CLI utilities (`analyze_orth_geometry`, `analyze_orth_test_annotations`, `visualize_orth_augmentations`, `build_tooth_guidance`, `sam`) — see [`tools/README.md`](tools/README.md) |
+| `scripts/` | per-`(detector, task)` train / eval launchers under `scripts/train/` and `scripts/eval/`, plus the shared `scripts/common.sh` — see [`scripts/README.md`](scripts/README.md) |
 
-The `datasets/` name belongs to this project's own annotation pipeline; the
-inherited upstream scripts were parked in `datasets_coco/` and are not imported
-by any training code.
+`datasets/prepare_coco.py` builds every COCO JSON the trainers read, for both
+tasks, in two steps per task:
 
-Both conversion scripts assume the **`images/` + `anno/` layout**:
+```bash
+python datasets/prepare_coco.py --task caries            # run the needed steps
+python datasets/prepare_coco.py --task orth --overwrite   # force a rebuild
+python datasets/prepare_coco.py --task orth --dry-run     # report only
+```
+
+Step 1 (`to-coco`) turns the raw LabelMe annotations into
+`<input_dir>/<coco>.json`; step 2 (`split`) writes the `*_train.json` /
+`*_test.json` pair. Before running anything the script scans the `.datasets`
+tree and skips a step whose outputs already exist and are newer than their
+inputs, so re-running is cheap. `--task caries|orth` also picks the input and
+output paths from `utils/task_paths.py`, so this pipeline and the training
+entry points can never disagree about where a dataset lives.
+
+It assumes the **`images/` + `anno/` layout**:
 
 ```
 <root>/<sample_id>/images/<any/depth>/<name>.<suffix>   # images
 <root>/<sample_id>/anno/<any/depth>/<name>.json         # LabelMe annotations
 ```
 
-`file_name` in the emitted COCO JSON is relative to `--data-dir`, so a sample
+`file_name` in the emitted COCO JSON is relative to `<data_dir>`, so a sample
 is always `<sample_id>/images/<any/depth>/<name>.<suffix>`. Raw datasets that
 still use the old co-located layout are converted once with:
 
@@ -154,22 +168,29 @@ python datasets/migrate_to_images_anno_layout.py --root <root> --dry-run  # prev
 python datasets/migrate_to_images_anno_layout.py --root <root>            # then apply
 ```
 
-`caries_to_coco.py` and `orth_to_coco.py` share the same discovery rules: an
-image and its annotation are paired by their path relative to `--data-dir` with
-the `images` / `anno` component removed and the file suffix dropped, so
-`2207/images/D/41.png` and `2207/anno/D/41.json` (or `2207/anno/41.json`) both
-pair up. Consequences:
+The discovery rules are the same for both tasks: an image and its annotation
+are paired by their path relative to `<data_dir>` with the `images` / `anno`
+component removed and the file suffix dropped, so `2207/images/D/41.png` and
+`2207/anno/D/41.json` (or `2207/anno/41.json`) both pair up. Consequences:
 
 * the annotation folder depth is free — any `<view>` nesting (or none) works,
 * any image suffix in `IMAGE_SUFFIXES` is accepted, not only `.png` / `.jpg`,
 * images without an annotation are kept as negative samples; pass
   `--drop-empty-images` to drop them instead.
 
-`caries_to_coco.py` additionally accepts `--allow-missing-images` to keep the
-records of annotations whose image file is missing (off by default, so every
-emitted `file_name` exists on disk), and — unlike `orth_to_coco.py` — never
-fails on an unreadable image: it falls back to the LabelMe `imageWidth` /
-`imageHeight` fields and finally to `0 x 0`.
+Task-specific behaviour:
+
+* **caries** emits a shape only when the LabelMe `flags["1"]` marker is true
+  (unhealthy tooth), and only for polygons of at least three points.
+  `--allow-missing-images` keeps the records of annotations whose image file is
+  missing (off by default, so every emitted `file_name` exists on disk); a
+  record whose size cannot be determined falls back to `0 x 0`.
+* **orth** turns `rectangle` / `polygon` shapes into boxes, with categories
+  from the built-in IOTN/DHC table. `--label-mode supercategory` (default)
+  collapses the 32 codes into anomaly groups, `--label-mode code` keeps them,
+  and `--labels` overrides both with an explicit order. Annotations carry
+  `orth_code` / `severity_raw` metadata, and an undeterminable size is an
+  error.
 
 Swin-MAE *pretraining* is not part of this repository — the pretrained
 checkpoints under `.checkpoints/pretrain/` come from the sibling `Swin-MAE`
@@ -181,8 +202,6 @@ project.
 See [Inference Demo with Pre-trained Model](demo/README.md)
 
 See [Results](#results).
-
-See [Preparing Datasets for MaskDINO](datasets_coco/README.md).
 
 See [Getting Started](#getting-started-1).
 
@@ -210,7 +229,7 @@ hidden dimension `1024` (`hid 1024`) and not using mask-enhance initialization (
 <th valign="bottom">GFlops</th>
 <th valign="bottom">download</th>
 
- <tr><td align="left">MaskDINO (hid 1024) | <a href="configs/coco/instance-segmentation/maskdino_R50_bs16_50ep_3s.yaml">config</a></td>
+ <tr><td align="left">MaskDINO (hid 1024) | <a href="https://github.com/IDEA-Research/MaskDINO/blob/main/configs/coco/instance-segmentation/maskdino_R50_bs16_50ep_3s.yaml">config</a></td>
 <td align="center">R50</td>
 <td align="center">50</td>
 <td align="center">46.1</td>
@@ -220,7 +239,7 @@ hidden dimension `1024` (`hid 1024`) and not using mask-enhance initialization (
 <td align="center"><a href="https://github.com/IDEA-Research/detrex-storage/releases/download/maskdino-v0.1.0/maskdino_r50_50ep_300q_hid1024_3sd1_instance_maskenhanced_mask46.1ap_box51.5ap.pth">model</a></td>
 </tr>
 
- <tr><td align="left">MaskDINO | <a href="configs/coco/instance-segmentation/maskdino_R50_bs16_50ep_3s_dowsample1_2048.yaml">config</a></td>
+ <tr><td align="left">MaskDINO | <a href="https://github.com/IDEA-Research/MaskDINO/blob/main/configs/coco/instance-segmentation/maskdino_R50_bs16_50ep_3s_dowsample1_2048.yaml">config</a></td>
 <td align="center">R50</td>
 <td align="center">50</td>
 <td align="center">46.3</td>
@@ -230,7 +249,7 @@ hidden dimension `1024` (`hid 1024`) and not using mask-enhance initialization (
 <td align="center"><a href="https://github.com/IDEA-Research/detrex-storage/releases/download/maskdino-v0.1.0/maskdino_r50_50ep_300q_hid2048_3sd1_instance_maskenhanced_mask46.3ap_box51.7ap.pth">model</a></td>
 </tr>
 
- <tr><td align="left">MaskDINO (no mask enhance) | <a href="configs/coco/instance-segmentation/swin/maskdino_R50_bs16_50ep_4s_dowsample1_2048.yaml">config</a></td>
+ <tr><td align="left">MaskDINO (no mask enhance) | <a href="https://github.com/IDEA-Research/MaskDINO/blob/main/configs/coco/instance-segmentation/swin/maskdino_R50_bs16_50ep_4s_dowsample1_2048.yaml">config</a></td>
 <td align="center">Swin-L (IN21k)</td>
 <td align="center">50</td>
 <td align="center">52.1</td>
@@ -240,7 +259,7 @@ hidden dimension `1024` (`hid 1024`) and not using mask-enhance initialization (
 <td align="center"><a href="https://github.com/IDEA-Research/detrex-storage/releases/download/maskdino-v0.1.0/maskdino_swinl_50ep_300q_hid2048_3sd1_instance_mask52.1ap_box58.3ap.pth">model</a></td>
 </tr>
 
- <tr><td align="left">MaskDINO | <a href="configs/coco/instance-segmentation/swin/maskdino_R50_bs16_50ep_4s_dowsample1_2048.yaml">config</a></td>
+ <tr><td align="left">MaskDINO | <a href="https://github.com/IDEA-Research/MaskDINO/blob/main/configs/coco/instance-segmentation/swin/maskdino_R50_bs16_50ep_4s_dowsample1_2048.yaml">config</a></td>
 <td align="center">Swin-L (IN21k)</td>
 <td align="center">50</td>
 <td align="center">52.3</td>
@@ -274,7 +293,7 @@ hidden dimension `1024` (`hid 1024`) and not using mask-enhance initialization (
 <th valign="bottom">mIoU</th>
 <th valign="bottom">download</th>
 
- <tr><td align="left">MaskDINO | <a href="configs/coco/panoptic-segmentation/maskdino_R50_bs16_50ep_3s_dowsample1_2048.yaml">config</a></td>
+ <tr><td align="left">MaskDINO | <a href="https://github.com/IDEA-Research/MaskDINO/blob/main/configs/coco/panoptic-segmentation/maskdino_R50_bs16_50ep_3s_dowsample1_2048.yaml">config</a></td>
 <td align="center">R50</td>
 <td align="center">50</td>
 <td align="center">53.0</td>
@@ -283,7 +302,7 @@ hidden dimension `1024` (`hid 1024`) and not using mask-enhance initialization (
 <td align="center">60.6</td>
 <td align="center"><a href="https://github.com/IDEA-Research/detrex-storage/releases/download/maskdino-v0.1.0/maskdino_r50_50ep_300q_hid2048_3sd1_panoptic_pq53.0.pth">model</a></td>
 
- <tr><td align="left">MaskDINO | <a href="configs/coco/panoptic-segmentation/swin/maskdino_R50_bs16_50ep_4s_dowsample1_2048.yaml">config</a></td>
+ <tr><td align="left">MaskDINO | <a href="https://github.com/IDEA-Research/MaskDINO/blob/main/configs/coco/panoptic-segmentation/swin/maskdino_R50_bs16_50ep_4s_dowsample1_2048.yaml">config</a></td>
 <td align="center">Swin-L (IN21k)</td>
 <td align="center">50</td>
 <td align="center">58.3</td>
@@ -317,14 +336,14 @@ We use hidden dimension `1024` and 100 queries for semantic segmentation.
 <th valign="bottom">mIoU</th>
 <th valign="bottom">download</th>
 
- <tr><td align="left">MaskDINO | <a href="configs/ade20k/semantic-segmentation/maskdino_R50_bs16_160k_steplr.yaml">config</a></td>
+ <tr><td align="left">MaskDINO | <a href="https://github.com/IDEA-Research/MaskDINO/blob/main/configs/ade20k/semantic-segmentation/maskdino_R50_bs16_160k_steplr.yaml">config</a></td>
 <td align="center">ADE20K</td>
 <td align="center">R50</td>
 <td align="center">160k</td>
 <td align="center">48.7</td>
 <td align="center"><a href="https://github.com/IDEA-Research/detrex-storage/releases/download/maskdino-v0.1.0/maskdino_r50_50ep_100q_celoss_hid1024_3s_semantic_ade20k_48.7miou.pth">model</a></td>
 
- <tr><td align="left">MaskDINO | <a href="configs/cityscapes/semantic-segmentation/maskdino_R50_bs16_90k_steplr.yaml">config</a></td>
+ <tr><td align="left">MaskDINO | <a href="https://github.com/IDEA-Research/MaskDINO/blob/main/configs/cityscapes/semantic-segmentation/maskdino_R50_bs16_90k_steplr.yaml">config</a></td>
 <td align="center">Cityscapes</td>
 <td align="center">R50</td>
 <td align="center">90k</td>
@@ -340,6 +359,14 @@ All models were trained with  **4** NVIDIA A100 GPUs (ResNet-50 based models) or
 We will release more pretrained models in the future.
 # Getting Started
 
+> **Note** — the upstream `train_net.py` entry point and the stock
+> `configs/coco/`, `configs/ade20k/` and `configs/cityscapes/` recipes are **not**
+> part of this fork. The intraoral workflows run through `maskdino_unify.py` /
+> `maskrcnn_unify.py` with a `configs/<detector>/<task>/<variant>.yaml` — see
+> [Intraoral runs](#intraoral-runs-ssl-backbone-variants). The commands below are
+> kept as an upstream reference, and the `config` links above point at the
+> original MaskDINO repository.
+
 In the above tables, the "Name" column contains a link `config_path` to the config file, and the corresponding model checkpoints
 can be downloaded from the link in `model`.
 
@@ -353,7 +380,7 @@ following command first.
   ```
   for example, to reproduce our instance segmentation result, you can copy the config path from the table, download the pretrained checkpoint into `/path/to/checkpoint_file`, and run 
   ```sh
-  python train_net.py --eval-only --num-gpus 8 --config-file configs/coco/instance-segmentation/maskdino_R50_bs16_50ep_3s_dowsample1_2048.yaml MODEL.WEIGHTS /path/to/checkpoint_file
+  python train_net.py --eval-only --num-gpus 8 --config-file <MaskDINO-repo>/configs/coco/instance-segmentation/maskdino_R50_bs16_50ep_3s_dowsample1_2048.yaml MODEL.WEIGHTS /path/to/checkpoint_file
   ```
   which can reproduce the model. 
 #### Train MaskDINO to reproduce results

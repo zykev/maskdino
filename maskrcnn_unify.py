@@ -32,11 +32,14 @@ from detectron2.utils.logger import setup_logger
 import detectron2.utils.comm as comm
 import torch.nn.functional as F
 
-from datasets.class_balance import add_class_balance_config, compute_effective_class_weights
 from datasets.augmentations import (
     add_augmentation_config,
     augmentation_enabled,
     build_augmentations,
+)
+from utils.orth_class_balance import (
+    add_class_balance_config,
+    compute_effective_class_weights,
 )
 from utils.task_paths import add_input_dir_arg, resolve_task_paths
 from maskdino.config import add_ssl_backbone_config, add_swin_mae_backbone_config

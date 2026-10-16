@@ -27,7 +27,7 @@ from detectron2.structures import BoxMode
 from detectron2.utils.events import EventWriter, get_event_storage
 from detectron2.utils.visualizer import Visualizer
 
-from datasets.caries_to_coco import CATEGORIES_INFO as CARIES_CATEGORIES_INFO
+from datasets.prepare_coco import CARIES_CATEGORIES_INFO
 
 try:
     from tqdm.auto import tqdm
@@ -122,7 +122,7 @@ def load_categories(json_path: Path, task: str) -> list[str]:
         ]
         if category_names != expected_names:
             raise ValueError(
-                f"{json_path} caries categories do not match caries_to_coco.py: "
+                f"{json_path} caries categories do not match prepare_coco.py: "
                 f"expected {expected_names}, got {category_names}."
             )
     return category_names

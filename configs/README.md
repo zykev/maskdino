@@ -151,28 +151,29 @@ Detectron2 的 `cfg` 转成普通字典传给 `swanlab.init(config=...)`，所�
 可用 `--swanlab_name` 覆盖。运行前确保在 `intraoral` 环境里执行过一次
 `swanlab login`（key 会缓存在本地），否则 `online` 模式无法上传。
 
-## 校验目录树
+## 运行与校验
 
-两个脚本负责让这个矩阵保持正确。两者都是只读的，可以安全地重复运行。
-
-```bash
-# 20/20 configs: schema, backbone contract, checkpoint path, size divisibility
-python scripts/validate_ssl_configs.py
-
-# 20/20 configs: build the model, restore the real weights, run one training
-# forward and one inference forward on GPU
-CUDA_VISIBLE_DEVICES=0 python scripts/smoke_detectors.py --device cuda:0
-```
-
-`smoke_detectors.py` 接受 `--detector {all,maskrcnn,maskdino}`、
-`--task {all,caries,orth}`、`--family {all,none,resnet,swin,vit}`、
-`--variant <name>`、`--skip-load` 和 `--swin-depths`。此外还有：
+每个 `(detector, task)` 组合都有一个启动脚本，脚本会遍历 5 个变体
+（`no_ssl` / `simclr` / `swinmae` / `dentmag_swin` / `dinov2`），并从变体 YAML
+里读取 `OUTPUT_DIR`，因此不再需要手写 `--output_dir`：
 
 ```bash
-python scripts/inspect_ssl_checkpoints.py     # key counts per checkpoint
-python scripts/inspect_pretrain_tree.py       # print the key tree of a checkpoint
-python scripts/smoke_ssl_backbones.py         # encoder-level shape contract
+# 训练：5 个变体依次跑，MaskDINO + orth
+CUDA_VISIBLE_DEVICES=0 bash scripts/train/train_maskdino_orth.sh
+
+# 只跑部分变体
+VARIANTS="no_ssl swinmae" bash scripts/train/train_maskrcnn_caries.sh
+
+# 评估：输出目录自动取自 config，可选评估 split
+EVAL_SPLITS="train test" bash scripts/eval/eval_maskdino_orth.sh
+
+# 确认将执行哪些命令（不真正运行）
+DRY_RUN=1 bash scripts/train/train_maskrcnn_orth.sh
 ```
+
+文件名与变体列表通过 `scripts/common.sh` 统一维护（`ALL_VARIANTS`、
+`config_output_dir` 等）。完整的运行矩阵与环境变量见
+[`scripts/README.md`](../scripts/README.md)。
 
 ## 编辑时需谨记的约定
 
@@ -192,11 +193,9 @@ python scripts/smoke_ssl_backbones.py         # encoder-level shape contract
   入口按数据集名（`<task>_train`）自动选择对应策略，YAML 只需写自己任务的那一个节点。
 * **Checkpoint 使用绝对路径。** `SSL_WEIGHTS` 指向
   `maskdino/.checkpoints/pretrain/...`；它们不会相对配置文件解析。
-* **新增一个变体**意味着每个 `(detector, task)` 文件夹下都要新增一个文件，
-  并扩展 `scripts/validate_ssl_configs.py` 中的表格
-  （`SSL_EXPECTATIONS`、`detector/task/variant` 枚举）以及
-  `scripts/smoke_detectors.py` 中的表（`FAMILY_OF_VARIANT`），然后重新运行两者。
+* **新增一个变体**意味着每个 `(detector, task)` 文件夹下都要新增一个 YAML，
+  并在 `scripts/common.sh` 的 `ALL_VARIANTS` 中加入变体名，同时在变体 YAML 里
+  写好 `SWANLAB.NAME` 与 `OUTPUT_DIR`（启动脚本会从后者推导 `--output_dir`）。
 
-关于适配器的设计，请参见 `Docs/ssl_backbone_adapter_implementation_plan.md`；
-如果你手上还有引用了扁平 `default_*_config.yaml` 的旧命令行，
-请参见 `configs/_legacy/README.md`。
+关于适配器的设计，请参见 `Docs/ssl_backbone_adapter_implementation_plan.md`。
+旧的扁平 `default_*_config.yaml` 及其启动方式已全部移除，请不要再引用。

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create per-sample montages for individual orth augmentation strategies.
 
-Expects the orth raw-data layout used by datasets/orth_to_coco.py:
+Expects the orth raw-data layout used by datasets/prepare_coco.py:
 
     <data_dir>/<sample_id>/images/{D,F,L,R,U}.jpg
     <data_dir>/<sample_id>/anno/{D,F,L,R,U}.json
